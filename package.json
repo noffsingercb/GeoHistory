@@ -8,9 +8,11 @@
   "scripts": {
     "ingest": "tsx ingest.ts",
     "ingest:dump": "tsx ingest-dump.ts",
+    "ingest:timeline": "tsx ingest-timeline.ts",
     "seed": "tsx seed.ts",
     "score": "tsx score.ts",
     "rescope:foundings": "tsx rescope-foundings.ts",
+    "titles": "tsx display-titles.ts",
     "prune": "tsx prune.ts",
     "prune:series": "tsx prune-series.ts",
     "timeline": "tsx timeline.ts",
