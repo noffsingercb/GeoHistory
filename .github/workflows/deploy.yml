@@ -1,18 +1,22 @@
 # =============================================================================
-# Deploy to Fly.io
+# Deploy to Fly.io -- DORMANT
 # =============================================================================
-# The problem this workflow solves: the image must contain events.sqlite, but
-# events.sqlite is gitignored and lives on a workstation. GitHub's runners never
-# see it. So the dataset is stored ONCE as a release asset and fetched at deploy
-# time -- which decouples "the code changed" from "the data changed":
+# STATUS: not in use. Fly requires a payment method before a new organization
+# can create machines, so there is no Fly app behind this. The active host is
+# Render, which builds from the repository on its own (see render.yaml) and
+# needs no workflow here.
 #
-#   Code change   -> push to main -> this runs automatically, reusing the
-#                    dataset already published. No upload, no local step.
-#   Dataset change -> publish a new release asset (below), then run this
-#                    workflow from the Actions tab.
+# This file is kept, not deleted. The image is host-agnostic -- the Dockerfile
+# pulls the dataset from the GitHub release, so it builds identically anywhere.
+# If Fly is ever revisited, the only prerequisites are the one-time setup below
+# and restoring the `push` trigger.
+#
+# It runs on workflow_dispatch ONLY. On a push trigger it would fail on every
+# commit to main, and a permanently red repository teaches you to stop reading
+# the red.
 #
 # ---------------------------------------------------------------------------
-# ONE-TIME SETUP
+# ONE-TIME SETUP, IF FLY IS EVER USED
 # ---------------------------------------------------------------------------
 # 1. Fly app + token:
 #      fly launch --no-deploy --copy-config --name geohistory-api
@@ -25,33 +29,25 @@
 #
 # 3. Publish the dataset (from the folder holding a scored events.sqlite):
 #      gh release create dataset-latest events.sqlite \
-#        --title "Dataset" --notes "dump-v0.5+struct-v0.6+reach-v0.2"
+#        --title "Dataset" --notes "dump-v0.5+struct-v0.6+reach-v0.2+prune3"
 #
 # ---------------------------------------------------------------------------
-# PUBLISHING A NEW DATASET LATER
+# PUBLISHING A NEW DATASET
 # ---------------------------------------------------------------------------
-# Reuse the same tag so this workflow always finds the current file:
+# This applies to Render too -- the release asset IS the deployed dataset.
+# Reuse the same tag so every build finds the current file:
 #      gh release upload dataset-latest events.sqlite --clobber
-# Then re-run this workflow from the Actions tab.
-#
-# Note that the release asset is the deployed dataset. If it is stale, every
-# automatic code deploy quietly ships stale data -- so the verification step at
-# the end prints datasetBuild and total, and those are worth reading.
+# Then redeploy. Bump DATASET_VERSION in the Dockerfile, or clear the build
+# cache, or the build will reuse a cached layer holding the old database.
 # =============================================================================
 
-name: Deploy
+name: Deploy (Fly, manual)
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 # Never let two deploys race. Unlike CI, an in-flight deploy is NOT cancelled --
-# interrupting a Fly release mid-rollout is worse than waiting for it.
+# interrupting a release mid-rollout is worse than waiting for it.
 concurrency:
   group: deploy-fly
   cancel-in-progress: false
@@ -61,7 +57,6 @@ jobs:
     name: Build and deploy
     runs-on: ubuntu-latest
 
-    # The dataset lives on a release, so the token needs to read releases.
     permissions:
       contents: read
 
@@ -70,50 +65,13 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------------------------------------------------
-      # Fetch the dataset
-      # ---------------------------------------------------------------------
-      # Downloaded into the build context so the Dockerfile's
-      # `COPY --chmod=444 events.sqlite` finds it exactly where a local build
-      # would. .dockerignore deliberately does NOT exclude it.
-      - name: Download events.sqlite from release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! gh release download dataset-latest --pattern events.sqlite --clobber; then
-            echo "::error::No 'dataset-latest' release asset named events.sqlite."
-            echo "::error::Publish one first: gh release create dataset-latest events.sqlite"
-            exit 1
-          fi
-
-      # A truncated or LFS-pointer download would otherwise fail deep inside the
-      # Docker build with a confusing SQLite error. Check the file is a real
-      # SQLite database before spending time on a build.
-      - name: Verify dataset
-        run: |
-          set -euo pipefail
-          test -f events.sqlite || { echo "::error::events.sqlite missing."; exit 1; }
-          size=$(stat -c%s events.sqlite)
-          echo "events.sqlite: $size bytes"
-          if [ "$size" -lt 1000000 ]; then
-            echo "::error::events.sqlite is implausibly small ($size bytes)."
-            exit 1
-          fi
-          header=$(head -c 15 events.sqlite)
-          if [ "$header" != "SQLite format 3" ]; then
-            echo "::error::Not a SQLite database (header: '$header')."
-            exit 1
-          fi
-
-      # ---------------------------------------------------------------------
       # Deploy
       # ---------------------------------------------------------------------
+      # No dataset download step: the Dockerfile fetches events.sqlite from the
+      # release itself, so the build context no longer has to carry it.
       - name: Set up flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # --remote-only builds on Fly's builders rather than this runner, so the
-      # build context (including the dataset) is uploaded once and the image
-      # never crosses the network a second time.
       - name: Deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -122,11 +80,10 @@ jobs:
       # ---------------------------------------------------------------------
       # Verify the release is actually serving
       # ---------------------------------------------------------------------
-      # Fly reporting a successful release only means the machine started and
-      # /v1/health answered. /v1/health does not touch the database. This step
-      # asks /v1/meta, which does -- and prints which dataset went out, so a
-      # stale release asset is visible in the job log rather than discovered by
-      # a tester.
+      # A successful release only means the machine started and /v1/health
+      # answered, and /v1/health does not touch the database. /v1/meta does --
+      # and printing the dataset build makes a stale release asset visible in
+      # the job log rather than discovered by a tester.
       - name: Verify deployment
         run: |
           set -euo pipefail
