@@ -1,0 +1,84 @@
+# =============================================================================
+# Docker build context exclusions
+# =============================================================================
+# The Dockerfile copies sources explicitly (COPY server.ts core.ts ...) rather
+# than `COPY . .`, so this file is not what decides image contents -- it decides
+# how much data gets shipped to the Docker daemon before the build starts.
+#
+# That matters here more than in most repos: seed/ holds five multi-megabyte
+# timeline JSONs, and node_modules carries a compiled native module for the
+# host platform that must never be confused with the one built inside the image.
+#
+# DELIBERATELY NOT IGNORED: events.sqlite. It is gitignored but it is the whole
+# point of the image -- Step 1.4 bakes the dataset in. If it is missing from the
+# build context the COPY fails, which is the correct and loud outcome.
+# =============================================================================
+
+# --- Dependencies ------------------------------------------------------------
+# Reinstalled inside the builder stage. A host-built better-sqlite3 binary is
+# the wrong architecture and would silently shadow the correct one.
+node_modules
+npm-debug.log*
+
+# --- Version control and CI --------------------------------------------------
+.git
+.gitignore
+.github
+
+# --- Docker and deploy config ------------------------------------------------
+# Not needed at runtime; excluding them also stops an edit to fly.toml from
+# invalidating the Docker layer cache.
+Dockerfile
+.dockerignore
+fly.toml
+.fly
+
+# --- Source data and pipeline scripts ----------------------------------------
+# The image runs the API only. Ingest, scoring, classification, pruning and
+# seeding are build-time concerns that happen on a workstation against a local
+# events.sqlite -- none of them belong in a deployed container, and seed/ is by
+# far the largest thing in the repo.
+seed
+ingest.ts
+ingest-dump.ts
+seed.ts
+score.ts
+classify.ts
+display-titles.ts
+rescope-foundings.ts
+prune.ts
+prune-series.ts
+prune-seed-dupes.ts
+stats.ts
+search.ts
+timeline.ts
+schema.sql
+
+# --- Local artifacts ---------------------------------------------------------
+# Working copies, backups and partial dumps that accumulate next to the real
+# database. events.sqlite itself is intentionally absent from this list.
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.bak
+*.sqlite.tmp
+dumps
+*.jsonl
+*.tsv.bak
+
+# --- Docs --------------------------------------------------------------------
+README.md
+LICENSE
+*.md
+
+# --- Editor and OS noise -----------------------------------------------------
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- Environment -------------------------------------------------------------
+# Runtime configuration is supplied by fly.toml and `fly secrets`, never baked.
+.env
+.env.*
