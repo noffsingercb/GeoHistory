@@ -229,7 +229,31 @@ if (unmatched.size > 0) {
 // ---------- Finish ----------
 if (!DRY_RUN) {
   db.exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild');`);
+
+  // Record the run in meta. This is not bookkeeping for its own sake:
+  // server.ts derives the datasetBuild id reported by /v1/meta by counting the
+  // prune stamps present in this table. prune.ts writes last_prune and
+  // prune-series.ts writes last_series_prune, but this script wrote nothing --
+  // so a database that had been through all three prunes still announced
+  // itself as 'prune2', understating what had been done to it.
+  //
+  // That was survivable while the file sat on a workstation and could be
+  // inspected directly. It stops being survivable once Step 1.4 bakes the
+  // database into an immutable image, because the build id is then the only
+  // handle anyone has on which artifact is deployed.
+  //
+  // The stamp is written on every apply, including re-runs that remove nothing
+  // (deleted === 0). That is intentional -- the value records when the verdicts
+  // were last applied, not only when they last changed something.
+  db.prepare(
+    `INSERT INTO meta(key, value) VALUES(?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(
+    'last_dupe_prune',
+    `${deleted} seed rows removed, ${patched} dump dates merged at ${new Date().toISOString()}`,
+  );
 }
+
 const seedCount = (db.prepare(`SELECT COUNT(*) AS c FROM events WHERE ingest_version LIKE 'seed-%'`).get() as any).c;
 const grand = (db.prepare(`SELECT COUNT(*) AS c FROM events`).get() as any).c;
 console.log(`\nSeed rows in DB: ${seedCount}. Total events: ${grand}.`);
