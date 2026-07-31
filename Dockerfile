@@ -33,7 +33,7 @@
 FROM node:20-slim AS dataset
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates \
+ && apt-get install -y --no-install-recommends curl ca-certificates sqlite3 \
  && rm -rf /var/lib/apt/lists/*
 
 # DATASET_VERSION does nothing but change this layer's cache key. Uploading a
@@ -63,7 +63,46 @@ RUN echo "Fetching dataset ${DATASET_VERSION}" \
  && if [ "$header" != "SQLite format 3" ]; then \
       echo "ERROR: not a SQLite database (header: '${header}')."; \
       exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Journal mode: WAL is wrong for a shipped, read-only artifact
+# ---------------------------------------------------------------------------
+# This is the fix for the first Render deploy, which built cleanly and then
+# died at startup with SQLITE_READONLY_DIRECTORY while preparing the very first
+# statement.
+#
+# Opening a WAL database is NOT a read-only filesystem operation, even on a
+# read-only connection. Before SQLite can read a single row it must create a
+# `-shm` shared-memory index alongside the database file. In the runtime image
+# that directory is root-owned and the process runs as `node`, so the create
+# failed -- and SQLite correctly reported the DIRECTORY, not the file, as the
+# read-only thing. On a workstation this never appears, because the folder
+# holding events.sqlite is writable.
+#
+# DELETE mode needs no -shm and no writable directory. The conversion also
+# checkpoints any outstanding WAL frames into the main file first, so no data
+# is left behind. The stray sidecar files are removed in case the uploaded
+# asset was accompanied by them.
+#
+# NOTE: this does not shrink the file. At ~930 MB for ~107k rows the database
+# is mostly free pages left by three prune passes; SQLite never returns those
+# to the filesystem without a VACUUM. Vacuuming is deliberately NOT done here
+# -- it needs roughly double the file size in scratch space and would put a
+# multi-minute, disk-hungry step on the critical path of every deploy. Do it
+# once on the workstation and re-upload:
+#   sqlite3 events.sqlite "VACUUM;"
+RUN echo "Journal mode before: $(sqlite3 events.sqlite 'PRAGMA journal_mode;')" \
+ && sqlite3 events.sqlite "PRAGMA journal_mode=DELETE;" \
+ && mode=$(sqlite3 events.sqlite "PRAGMA journal_mode;") \
+ && echo "Journal mode after: ${mode}" \
+ && if [ "$mode" != "delete" ]; then \
+      echo "ERROR: could not convert the dataset out of WAL mode (got '${mode}')."; \
+      echo "ERROR: a WAL database needs a writable directory to be read at all."; \
+      exit 1; \
     fi \
+ && rm -f events.sqlite-wal events.sqlite-shm \
+ && sqlite3 events.sqlite "PRAGMA integrity_check;" | head -1 \
  && chmod 444 events.sqlite
 
 
@@ -106,7 +145,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     PORT=8787 \
-    GEOHISTORY_DB=/app/events.sqlite
+    GEOHISTORY_DB=/app/data/events.sqlite
 
 # node_modules is copied wholesale rather than reinstalled, so the compiled
 # better-sqlite3 binary is the exact one built above against this same base
@@ -123,17 +162,26 @@ COPY server.ts core.ts ./
 # ---------------------------------------------------------------------------
 # The dataset
 # ---------------------------------------------------------------------------
-# Mode 0444, set in the dataset stage and preserved by this copy. The service is
-# a read-only query surface: nothing in the request path writes to the database,
-# and making that structurally impossible means a bug cannot corrupt the shipped
-# dataset, only fail loudly.
+# The file is mode 0444 and stays that way: the service is a read-only query
+# surface, nothing in the request path writes to the database, and making that
+# structurally impossible means a bug cannot corrupt the shipped dataset, only
+# fail loudly.
 #
-# This requires server.ts to open the database with `readonly: true`. A
-# read-write open against a 0444 file fails at startup, and better-sqlite3 will
-# also refuse to set `journal_mode = WAL` on a read-only handle. If the
-# container exits immediately with SQLITE_READONLY or SQLITE_CANTOPEN, that is
-# this line talking -- fix the open flags rather than loosening the mode.
-COPY --from=dataset /data/events.sqlite /app/events.sqlite
+# The DIRECTORY, however, is deliberately owned by `node` and writable. That is
+# not a loosening of the read-only guarantee -- the database file itself is
+# still unwritable by the running user -- it is a backstop for SQLite's need to
+# create sidecar files. The dataset stage converts the database to DELETE
+# journal mode precisely so that no sidecar is needed, but if a future upload
+# arrives in WAL mode and that conversion is ever skipped or removed, this
+# directory is what keeps the service starting instead of dying with
+# SQLITE_READONLY_DIRECTORY before it serves a single request.
+#
+# If the container exits immediately with SQLITE_READONLY, SQLITE_CANTOPEN, or
+# SQLITE_READONLY_DIRECTORY, look here and at the journal mode in stage 1 --
+# and check `PRAGMA journal_mode` on the uploaded asset before loosening
+# anything.
+RUN mkdir -p /app/data && chown node:node /app/data
+COPY --from=dataset /data/events.sqlite /app/data/events.sqlite
 
 # Drop privileges. The `node` user ships with the base image as uid 1000.
 USER node
