@@ -1,0 +1,66 @@
+# =============================================================================
+# Render blueprint -- GeoHistory API
+# =============================================================================
+# Render can be set up entirely through its dashboard. This file exists so the
+# deployment is described in the repository instead of living only in a web UI,
+# for the same reason fly.toml does: config that nobody can review is config
+# that drifts.
+#
+# To use it: Render dashboard -> New -> Blueprint -> pick this repository.
+# Render reads this file and creates the service. If the blueprint flow gives
+# trouble, the equivalent manual settings are:
+#
+#   New -> Web Service -> connect noffsingercb/GeoHistory
+#   Language/Runtime: Docker
+#   Branch:           main
+#   Instance type:    Free
+#   Health check:     /v1/health
+#   Environment:      PORT = 8787
+#
+# THE DATASET DOES NOT COME FROM HERE. The Dockerfile downloads events.sqlite
+# from the `dataset-latest` GitHub release at build time. Publish it before the
+# first deploy or the build fails on purpose:
+#
+#   gh release create dataset-latest events.sqlite --title "Dataset"
+#
+# After uploading a new dataset to that tag, bump DATASET_VERSION in the
+# Dockerfile or use "Clear build cache & deploy" -- otherwise Render reuses the
+# cached layer and ships the old database while reporting success.
+#
+# FREE INSTANCES SLEEP after roughly 15 minutes with no traffic, and the next
+# request pays a cold start of up to a minute while the container boots. Circa
+# pings /v1/health when the page loads so the machine wakes while the visitor is
+# still filling in the form.
+# =============================================================================
+
+services:
+  - type: web
+    name: geohistory-api
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # Redeploy on every push to main. The dataset is unaffected by this: it is
+    # fetched from the release, so a code deploy cannot change the data.
+    autoDeploy: true
+
+    # /v1/health does not touch the database, which is what a liveness probe
+    # should be. /v1/meta is the readiness check and is worth curling by hand
+    # after a deploy -- it reports which dataset actually shipped.
+    healthCheckPath: /v1/health
+
+    envVars:
+      # Matches EXPOSE and the container healthcheck. Render would otherwise
+      # inject its own port and the two would disagree.
+      - key: PORT
+        value: 8787
+
+      # Set in the Render dashboard once Cloudflare Pages has issued a URL.
+      # Until then the browser is refused every request even though the API is
+      # healthy, and the failure looks exactly like an outage. sync: false keeps
+      # the value out of the repo and stops a blueprint sync from clearing it.
+      - key: ALLOWED_ORIGIN
+        sync: false
