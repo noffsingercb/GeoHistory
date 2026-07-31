@@ -262,6 +262,11 @@ function datasetMeta(): Record<string, unknown> {
  * hand-maintained, so it cannot go stale the way the hardcoded engine string
  * did. Note that `npm run score` restamps dataset_version and so changes this
  * id -- correct, because that is a different artifact.
+ *
+ * The prune list below is the one part of this that IS hand-maintained, and it
+ * has already been wrong once: prune-seed-dupes.ts wrote no stamp at all, so a
+ * database that had been through three prunes reported 'prune2'. Any new prune
+ * script must both write a meta key and be added here, or it stays invisible.
  */
 function datasetBuild(m: Record<string, unknown>): {
   id: string;
@@ -274,7 +279,9 @@ function datasetBuild(m: Record<string, unknown>): {
     reach: str('reach_version'),
     // Full stamps, e.g. 'election<0.25 removed 1047 at <ISO>'. Order is fixed so
     // the id is stable for a given file.
-    prunes: [str('last_prune'), str('last_series_prune')].filter((v): v is string => v !== null),
+    prunes: [str('last_prune'), str('last_series_prune'), str('last_dupe_prune')].filter(
+      (v): v is string => v !== null,
+    ),
   };
   const id = [
     layers.ingest ?? 'unknown-ingest',
