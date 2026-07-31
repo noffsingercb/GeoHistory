@@ -1,0 +1,78 @@
+# =============================================================================
+# Fly.io deployment configuration -- geohistory-api
+# =============================================================================
+# First-time setup (once, from a working copy that HAS events.sqlite):
+#
+#   fly launch --no-deploy --copy-config --name geohistory-api
+#   fly secrets set ALLOWED_ORIGIN=https://your-circa-site.example
+#   fly deploy
+#   curl https://geohistory-api.fly.dev/v1/meta
+#
+# The dataset is baked into the image, so there is no volume, no database
+# attachment, and no persistent storage of any kind. Shipping a new dataset
+# means rebuilding and redeploying -- that is the intended model, not a
+# limitation. It also means a rollback (`fly releases` / `fly deploy --image`)
+# rolls back the data along with the code, which is exactly what you want when
+# a scoring pass turns out badly.
+# =============================================================================
+
+app = "geohistory-api"
+primary_region = "den"   # Denver -- closest to the author; single region is fine for a read-only API
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8787"
+  NODE_ENV = "production"
+  GEOHISTORY_DB = "/app/events.sqlite"
+
+  # Rate limiting is per-machine and in-memory. With auto-stop enabled a client
+  # can technically get a fresh bucket after a machine cycles; acceptable for an
+  # API serving a single-page app, and the values match the server defaults.
+  RATE_LIMIT_MAX = "60"
+  RATE_LIMIT_WINDOW = "60"
+
+  # ALLOWED_ORIGIN is deliberately NOT set here. It is a `fly secrets` value so
+  # the allowlist can change without a code change or a commit. If it is unset
+  # AND NODE_ENV is production, server.ts allows no browser origins at all --
+  # curl will work and the web app will not. That failure mode is intentional:
+  # a forgotten CORS allowlist should be obvious, not silently permissive.
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+
+  # The dataset is read-only and identical on every machine, so there is no
+  # session state and no reason to keep one running when nobody is asking.
+  # Cold start is a container start plus a SQLite open of a local file --
+  # fast, because there is no data to fetch or warm.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # A timeline request is a handful of indexed SQLite queries. Concurrency is
+  # bounded well below anything that would exhaust memory.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 60
+
+  # /v1/health does not touch the database -- it answers whether the process is
+  # alive. That is the right question for a liveness probe. Whether the dataset
+  # loaded correctly is answered by /v1/meta, which the deploy workflow checks
+  # after the release goes out.
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/v1/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  # 512 MB is a starting point, not a measurement. better-sqlite3 memory-maps
+  # the database, so resident memory tracks the working set of pages actually
+  # touched rather than the full ~107k-row file. Watch `fly logs` for OOM kills
+  # on the first few real timeline runs and raise to 1gb if any appear.
