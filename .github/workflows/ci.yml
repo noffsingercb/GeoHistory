@@ -1,0 +1,78 @@
+# =============================================================================
+# Continuous integration
+# =============================================================================
+# This repository has no test suite, so type-checking is the only automated
+# correctness gate available. It is a real one: core.ts, server.ts and the
+# pipeline scripts share types, and the engine/client contract drifting is a
+# failure mode this project has already hit once (Circa's types.ts still
+# mirrors geohistory-core@0.4.1 against a 0.5.1 engine).
+#
+# What this CANNOT check: whether the Docker image builds. The image requires
+# events.sqlite, which is gitignored and never leaves the workstation. The
+# Dockerfile is therefore linted for syntax only. A genuine build is a local
+# `docker build -t geohistory-api .` -- see .github/workflows/deploy.yml.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to a PR makes the previous run irrelevant; cancel it rather than
+# paying for both.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # `npm ci` installs from package-lock.json exactly, so CI cannot pass on a
+      # dependency tree that differs from the one committed. better-sqlite3 is a
+      # native module; ubuntu-latest has the toolchain it needs if no prebuilt
+      # binary is available for Node 20.
+      - name: Install dependencies
+        run: npm ci
+
+      # --noEmit: check types, write nothing. tsconfig.json governs which files
+      # are included, so this covers the pipeline scripts as well as the API.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+  dockerfile:
+    name: Dockerfile lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Catches malformed instructions, bad stage references and unset
+      # variables without needing the dataset. This is a syntax check, not a
+      # build -- it will not tell you the image runs.
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          # DL3008: apt packages are unpinned by design here -- the base image
+          #         is already pinned to node:20-slim and pinning apt versions
+          #         on top of it breaks the build every security update.
+          # DL3018 is the apk equivalent and does not apply, but is listed so a
+          #         future switch to an Alpine base does not fail unexpectedly.
+          ignore: DL3008,DL3018
+          failure-threshold: warning
