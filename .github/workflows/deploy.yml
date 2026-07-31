@@ -1,0 +1,146 @@
+# =============================================================================
+# Deploy to Fly.io
+# =============================================================================
+# The problem this workflow solves: the image must contain events.sqlite, but
+# events.sqlite is gitignored and lives on a workstation. GitHub's runners never
+# see it. So the dataset is stored ONCE as a release asset and fetched at deploy
+# time -- which decouples "the code changed" from "the data changed":
+#
+#   Code change   -> push to main -> this runs automatically, reusing the
+#                    dataset already published. No upload, no local step.
+#   Dataset change -> publish a new release asset (below), then run this
+#                    workflow from the Actions tab.
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME SETUP
+# ---------------------------------------------------------------------------
+# 1. Fly app + token:
+#      fly launch --no-deploy --copy-config --name geohistory-api
+#      fly tokens create deploy -x 999999h
+#    Save the token as repository secret FLY_API_TOKEN
+#    (Settings -> Secrets and variables -> Actions -> New repository secret).
+#
+# 2. CORS allowlist -- set to wherever Circa is hosted, NOT to this API's URL:
+#      fly secrets set ALLOWED_ORIGIN=https://circa.pages.dev
+#
+# 3. Publish the dataset (from the folder holding a scored events.sqlite):
+#      gh release create dataset-latest events.sqlite \
+#        --title "Dataset" --notes "dump-v0.5+struct-v0.6+reach-v0.2"
+#
+# ---------------------------------------------------------------------------
+# PUBLISHING A NEW DATASET LATER
+# ---------------------------------------------------------------------------
+# Reuse the same tag so this workflow always finds the current file:
+#      gh release upload dataset-latest events.sqlite --clobber
+# Then re-run this workflow from the Actions tab.
+#
+# Note that the release asset is the deployed dataset. If it is stale, every
+# automatic code deploy quietly ships stale data -- so the verification step at
+# the end prints datasetBuild and total, and those are worth reading.
+# =============================================================================
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+# Never let two deploys race. Unlike CI, an in-flight deploy is NOT cancelled --
+# interrupting a Fly release mid-rollout is worse than waiting for it.
+concurrency:
+  group: deploy-fly
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+
+    # The dataset lives on a release, so the token needs to read releases.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # Fetch the dataset
+      # ---------------------------------------------------------------------
+      # Downloaded into the build context so the Dockerfile's
+      # `COPY --chmod=444 events.sqlite` finds it exactly where a local build
+      # would. .dockerignore deliberately does NOT exclude it.
+      - name: Download events.sqlite from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release download dataset-latest --pattern events.sqlite --clobber; then
+            echo "::error::No 'dataset-latest' release asset named events.sqlite."
+            echo "::error::Publish one first: gh release create dataset-latest events.sqlite"
+            exit 1
+          fi
+
+      # A truncated or LFS-pointer download would otherwise fail deep inside the
+      # Docker build with a confusing SQLite error. Check the file is a real
+      # SQLite database before spending time on a build.
+      - name: Verify dataset
+        run: |
+          set -euo pipefail
+          test -f events.sqlite || { echo "::error::events.sqlite missing."; exit 1; }
+          size=$(stat -c%s events.sqlite)
+          echo "events.sqlite: $size bytes"
+          if [ "$size" -lt 1000000 ]; then
+            echo "::error::events.sqlite is implausibly small ($size bytes)."
+            exit 1
+          fi
+          header=$(head -c 15 events.sqlite)
+          if [ "$header" != "SQLite format 3" ]; then
+            echo "::error::Not a SQLite database (header: '$header')."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------------
+      # Deploy
+      # ---------------------------------------------------------------------
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # --remote-only builds on Fly's builders rather than this runner, so the
+      # build context (including the dataset) is uploaded once and the image
+      # never crosses the network a second time.
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --wait-timeout 300
+
+      # ---------------------------------------------------------------------
+      # Verify the release is actually serving
+      # ---------------------------------------------------------------------
+      # Fly reporting a successful release only means the machine started and
+      # /v1/health answered. /v1/health does not touch the database. This step
+      # asks /v1/meta, which does -- and prints which dataset went out, so a
+      # stale release asset is visible in the job log rather than discovered by
+      # a tester.
+      - name: Verify deployment
+        run: |
+          set -euo pipefail
+          url="https://geohistory-api.fly.dev/v1/meta"
+          for attempt in 1 2 3 4 5; do
+            if body=$(curl -fsS --max-time 20 "$url"); then
+              echo "$body" | head -c 2000
+              build=$(echo "$body" | grep -o '"datasetBuild": *"[^"]*"' | head -1)
+              total=$(echo "$body" | grep -o '"totalEvents": *[0-9]*' | head -1)
+              echo "::notice::Deployed. $build $total"
+              exit 0
+            fi
+            echo "Attempt $attempt failed; machine may still be starting."
+            sleep 10
+          done
+          echo "::error::/v1/meta did not respond after the release."
+          exit 1
