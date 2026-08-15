@@ -3,18 +3,31 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getTimeline, renderMarkdown, DEFAULT_CONFIG, ENGINE_VERSION, type TimelineInput } from './core';
+import {
+  validateVote,
+  forwardVote,
+  feedbackRateLimit,
+  feedbackSweeper,
+  feedbackCounters,
+  FEEDBACK_CONFIGURED,
+} from './feedback';
 
 // ===================== geohistory JSON API (v1) =====================
 // A thin, dependency-free HTTP wrapper (Node built-in http) around the
 // deterministic timeline engine (core.ts) and full-text search, reading the
 // local events.sqlite strictly read-only.
 //
-// Exactly four routes exist, all under /v1:
+// Exactly five routes exist, all under /v1:
 //   GET  /v1/health
 //   GET  /v1/meta
 //   GET  /v1/search?q=<term>&limit=<n>
 //   POST /v1/timeline            (?format=markdown for Markdown)
+//   POST /v1/feedback            (thumbs up/down; forwarded, never stored here)
 // Everything else 404s.
+//
+// /v1/feedback is the one route that talks to the outside world. It still does
+// not write anything locally -- the database stays read-only -- it validates a
+// coarsened vote and hands it to a Notion Worker. See feedback.ts.
 //
 //   npm run serve            # http://localhost:8787  (override with PORT)
 //
@@ -27,6 +40,8 @@ import { getTimeline, renderMarkdown, DEFAULT_CONFIG, ENGINE_VERSION, type Timel
 //                      origins are allowed so `npm run dev` works out of the box.
 //   RATE_LIMIT_MAX     requests per IP per window (default 60)
 //   RATE_LIMIT_WINDOW  window in seconds (default 60)
+//   CIRCA_FEEDBACK_WEBHOOK_URL / CIRCA_FEEDBACK_SECRET / FEEDBACK_RATE_LIMIT_MAX
+//                      see feedback.ts; when unset, votes are accepted and dropped
 
 const SERVICE = 'geohistory-api';
 const API_VERSION = 'v1';
@@ -117,6 +132,13 @@ function sendText(
     ...corsHeaders(allowOrigin),
   });
   res.end(text);
+}
+
+/** 204 has no body by definition, so it cannot go through sendJson. */
+function sendNoContent(res: http.ServerResponse, allowOrigin: string | null = null): void {
+  if (res.writableEnded) return;
+  res.writeHead(204, { ...BASE_HEADERS, ...corsHeaders(allowOrigin) });
+  res.end();
 }
 
 // ===================== Logging (no bodies, truncated IPs) =====================
@@ -368,7 +390,7 @@ const server = http.createServer(async (req, res) => {
       return finish(429);
     }
 
-    // 4. Routes — exactly four, all under /v1.
+    // 4. Routes — exactly five, all under /v1.
     if (method === 'GET' && path === '/v1/health') {
       sendJson(res, 200, { ok: true }, allowOrigin);
       return finish(200);
@@ -443,6 +465,56 @@ const server = http.createServer(async (req, res) => {
       return finish(200);
     }
 
+    // POST /v1/feedback — a thumb, coarsened by the client, forwarded to Notion.
+    //
+    // Two things make this route unlike the others. It has a second, tighter
+    // rate limit: a vote is one click, so a visitor who legitimately fills a
+    // timeline and votes on a handful of tiles stays well under 10/min, while
+    // a script cannot spend somebody's 60/min timeline budget on thumbs. And it
+    // answers 204 WITHOUT awaiting the forward -- the browser should never wait
+    // on Notion, and a dead worker must not turn into a hung request.
+    if (method === 'POST' && path === '/v1/feedback') {
+      const fl = feedbackRateLimit(req.socket.remoteAddress ?? 'unknown');
+      if (!fl.ok) {
+        sendJson(res, 429, { error: 'Too many votes.' }, allowOrigin, {
+          'Retry-After': String(fl.retryAfter),
+        });
+        return finish(429);
+      }
+
+      let raw: string;
+      try {
+        raw = await readBody(req);
+      } catch (e: any) {
+        const status = e?.status === 413 ? 413 : 400;
+        sendJson(res, status, { error: e?.message ?? 'Could not read request body.' }, allowOrigin);
+        return finish(status);
+      }
+
+      let parsed: any;
+      try { parsed = JSON.parse(raw || '{}'); }
+      catch {
+        feedbackCounters.rejected++;
+        sendJson(res, 400, { error: 'Request body is not valid JSON.' }, allowOrigin);
+        return finish(400);
+      }
+
+      let vote;
+      try { vote = validateVote(parsed); }
+      catch (e: any) {
+        // A 400 here means the CLIENT is wrong, not the visitor, so it is worth
+        // surfacing the specific reason rather than swallowing it.
+        feedbackCounters.rejected++;
+        sendJson(res, 400, { error: e?.message ?? 'Invalid vote.' }, allowOrigin);
+        return finish(400);
+      }
+
+      feedbackCounters.accepted++;
+      void forwardVote(vote); // deliberately not awaited
+      sendNoContent(res, allowOrigin);
+      return finish(204);
+    }
+
     // 5. Catch-all. No root document, no directory listing, no hints beyond the version prefix.
     sendJson(res, 404, { error: 'Not found.', apiVersion: API_VERSION }, allowOrigin);
     return finish(404);
@@ -460,6 +532,7 @@ server.requestTimeout = REQUEST_TIMEOUT_MS + 5000;
 function shutdown(signal: string): void {
   console.log(`${signal} received, closing.`);
   clearInterval(sweeper);
+  clearInterval(feedbackSweeper);
   server.close(() => { db.close(); process.exit(0); });
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -470,6 +543,7 @@ server.listen(PORT, () => {
   console.log(`${SERVICE} listening on http://localhost:${PORT} (${API_VERSION})`);
   console.log(`  engine   ${ENGINE_VERSION}`);
   console.log(`  build    ${datasetBuild(m).id} - ${Number(m.totalEvents).toLocaleString()} events`);
-  console.log(`  routes:  GET /v1/health  GET /v1/meta  GET /v1/search  POST /v1/timeline`);
+  console.log(`  routes:  GET /v1/health  GET /v1/meta  GET /v1/search  POST /v1/timeline  POST /v1/feedback`);
   console.log(`  origins: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : (ALLOW_DEV_ORIGINS ? 'dev localhost only (ALLOWED_ORIGIN unset)' : 'none — set ALLOWED_ORIGIN')}`);
+  console.log(`  feedback: ${FEEDBACK_CONFIGURED ? 'forwarding to worker' : 'accept-and-drop (CIRCA_FEEDBACK_WEBHOOK_URL / CIRCA_FEEDBACK_SECRET unset)'}`);
 });
