@@ -42,6 +42,7 @@ const DISTANCE_BUCKETS = [
 export type Vote = {
   voteId: string;
   eventId: string;
+  eventTitle: string;
   verdict: (typeof VERDICTS)[number];
   scope: (typeof SCOPES)[number];
   significance: number;
@@ -61,13 +62,19 @@ export type Vote = {
 // session id -- so rather than stripping unknown fields silently, we refuse the
 // request. A careless client change then fails in the open instead of quietly
 // shipping a home town into a durable Notion database.
+//
+// eventTitle is the one string here describing the world rather than the
+// visitor. It is public dataset data, already rendered on the tile the vote
+// came from, and it exists so the Notion rows are readable as something other
+// than a column of opaque ids.
 const ALLOWED_KEYS = new Set<string>([
-  'voteId', 'eventId', 'verdict', 'scope', 'significance', 'reachKm',
+  'voteId', 'eventId', 'eventTitle', 'verdict', 'scope', 'significance', 'reachKm',
   'headroom', 'relaxed', 'distanceBucket', 'segmentDecade',
   'datasetVersion', 'buildId',
 ]);
 
 const MAX_ID_CHARS = 200;
+const MAX_TITLE_CHARS = 500;
 const DECADE_PATTERN = /^\d{3,4}0s$/;
 
 function requireString(v: unknown, name: string, max = MAX_ID_CHARS): string {
@@ -127,6 +134,7 @@ export function validateVote(body: unknown): Vote {
   return {
     voteId: requireString(b.voteId, 'voteId'),
     eventId: requireString(b.eventId, 'eventId'),
+    eventTitle: requireString(b.eventTitle, 'eventTitle', MAX_TITLE_CHARS),
     verdict: verdict as Vote['verdict'],
     scope: scope as Vote['scope'],
     significance: requireUnit(b.significance, 'significance'),
