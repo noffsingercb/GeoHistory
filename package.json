@@ -8,6 +8,7 @@
   "scripts": {
     "ingest": "tsx ingest.ts",
     "ingest:dump": "tsx ingest-dump.ts",
+    "migrate": "tsx migrate-v06.ts",
     "seed": "tsx seed.ts",
     "score": "tsx score.ts",
     "rescope:foundings": "tsx rescope-foundings.ts",
@@ -15,6 +16,7 @@
     "prune": "tsx prune.ts",
     "prune:series": "tsx prune-series.ts",
     "prune:dupes": "tsx prune-seed-dupes.ts",
+    "diag": "tsx diagnostics/v06-baseline.ts",
     "timeline": "tsx timeline.ts",
     "search": "tsx search.ts",
     "stats": "tsx stats.ts",
