@@ -109,6 +109,18 @@ db.pragma('foreign_keys = OFF');
 db.exec(readFileSync(join(__dirname, 'schema.sql'), 'utf8')); // ensure tables exist
 db.pragma('foreign_keys = OFF'); // schema.sql turns it back on; seed rows have no place_id
 
+// Refuse to seed a file with no scripted rows. The Sept 6 slice test ran the whole
+// post-ingest chain on a database the failed ingest had never written to, and the
+// seed rows alone looked like a (tiny) dataset. Override only for a deliberate test.
+{
+  const dumpRows = (db.prepare(`SELECT COUNT(*) AS c FROM events WHERE ingest_version IS NULL OR ingest_version NOT LIKE 'seed-%'`).get() as any).c as number;
+  if (dumpRows === 0 && !process.argv.includes('--allow-empty')) {
+    console.error(`\n!! ${DB_PATH} holds no dump rows (0 events outside seed-*): the ingest did not run or failed.`);
+    console.error('!! Run npm run ingest:check, then npm run ingest:dump. To seed an empty file on purpose: npm run seed -- --allow-empty\n');
+    process.exit(1);
+  }
+}
+
 const upsert = db.prepare(`
   INSERT INTO events
     (id, title, display_title, blurb, date_start, date_end, date_precision, lat, lng, scope, category, notability, source_url, source_ids, ingest_version)
