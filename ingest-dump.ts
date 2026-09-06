@@ -30,6 +30,21 @@ import Database from 'better-sqlite3';
 // the dump. If a scoring idea needs a fact this script does not keep, add the
 // COLUMN here; never add the judgement.
 //
+// v0.6.1 (Sept 6): the slice test ran the whole post-ingest chain on a file this
+// script never wrote to -- a bad WIKIDATA_DUMP path exited in under a second with
+// one red line, and nothing downstream noticed. Now:
+//   - npm run ingest:check   validates the dump (path, gzip magic, first lines are
+//     entities) and reports the target database. Writes nothing. Run it first.
+//   - a run cannot end quietly: stream errors, no entities early, zero coordinates
+//     after pass 1, zero events after pass 2 all exit non-zero behind a banner, and
+//     seed.ts (first post-ingest step) refuses a file with no dump rows.
+//   - progress lines carry % of dump read, elapsed time and an ETA per pass.
+//   - both passes skip JSON.parse on lines that cannot yield a kept row (no P625 /
+//     P279 text in pass 1; no date, birth/death, coordinate or P131 claim in pass 2).
+//     Lossless for every row the old code kept; roughly halves the wall-clock.
+//   - pass 2 first clears scripted rows + places, so INGEST_PASS=events (reuses the
+//     pass-1 scratch tables, ~half a run) rebuilds cleanly instead of on top of stale rows.
+//
 // Start from an EMPTY database file (GEOHISTORY_DB, default events.sqlite).
 // Inserts are INSERT OR IGNORE, so a re-run over an existing file keeps every
 // old row exactly as it was; the script refuses a pre-v0.6 file outright.
@@ -73,41 +88,72 @@ const START_YEAR = parseInt(process.env.INGEST_START_YEAR ?? '1275', 10); // ~75
 const END_YEAR = parseInt(process.env.INGEST_END_YEAR ?? String(new Date().getUTCFullYear()), 10);
 const MAX_LINES = process.env.INGEST_MAX_LINES ? parseInt(process.env.INGEST_MAX_LINES, 10) : 0; // 0 = no limit
 const PASS = (process.env.INGEST_PASS ?? 'all').toLowerCase(); // 'coords' | 'events' | 'all'
+const CHECK_ONLY = process.argv.includes('--check'); // npm run ingest:check -> validate + report, write nothing
 const INGEST_VERSION = 'dump-v0.6';
+const V06_COLUMNS = ['date_end', 'coord_source', 'category_root', 'wikidata_types', 'sitelinks', 'country_id', 'participants', 'deaths'];
 
-if (!DUMP || !fs.existsSync(DUMP)) {
-  console.error('Set WIKIDATA_DUMP to a local latest-all.json.gz path. Download: https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.gz');
-  process.exit(1);
+// ---------- fail loudly ----------
+// Every abort goes through here: a banner nobody can scroll past and a non-zero
+// exit, so `&&` chains and scripts/run-v06.ps1 stop instead of seeding an empty file.
+function fail(code: number, ...lines: string[]): never {
+  console.error('\n' + '!'.repeat(78));
+  for (const l of lines) console.error('!! ' + l);
+  console.error('!'.repeat(78) + '\n');
+  process.exit(code);
 }
+const fmtGB = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+const fmtDur = (ms: number): string => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+};
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('synchronous = NORMAL');
-db.pragma('foreign_keys = OFF');
-db.exec(readFileSync(join(__dirname, 'schema.sql'), 'utf8'));
-// schema.sql opens with PRAGMA foreign_keys = ON, which re-enables enforcement on
-// this connection. Pass 2 writes events.place_id / places.parent_id BEFORE (or
-// without ever) meeting the referenced place in the stream, so enforcement must
-// stay off for the build. Consumers open the file with SQLite's default (off).
-db.pragma('foreign_keys = OFF');
+// The dump must exist, be a file, and start with the gzip magic bytes.
+function validateDump(): { path: string; size: number } {
+  if (!DUMP) fail(1, 'WIKIDATA_DUMP is not set.', 'PowerShell:  $env:WIKIDATA_DUMP = "D:\\path\\to\\latest-all.json.gz"', 'Download:    https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.gz');
+  const path = DUMP as string;
+  if (!fs.existsSync(path)) fail(1, `WIKIDATA_DUMP points at a path that does not exist: ${path}`, 'Test-Path $env:WIKIDATA_DUMP must print True (check the drive letter, folder and file name).');
+  const st = fs.statSync(path);
+  if (!st.isFile()) fail(1, `WIKIDATA_DUMP is not a file: ${path}`);
+  if (st.size === 0) fail(1, `WIKIDATA_DUMP is empty (0 bytes): ${path}`);
+  const fd = fs.openSync(path, 'r');
+  const head = Buffer.alloc(2);
+  fs.readSync(fd, head, 0, 2, 0);
+  fs.closeSync(fd);
+  if (head[0] !== 0x1f || head[1] !== 0x8b) fail(1, `${path} is not gzip data (first bytes ${head.toString('hex')}); expected latest-all.json.gz.`);
+  if (st.size < 1024 ** 3) console.warn(`  WARNING: the dump is only ${fmtGB(st.size)}. A full Wikidata dump is well over 100 GB: partial download or test file?`);
+  return { path, size: st.size };
+}
+const dump = validateDump();
+console.log(`Dump: ${dump.path} (${fmtGB(dump.size)})  db: ${DB_PATH}  window ${START_YEAR}-${END_YEAR}  pass=${PASS}  ${MAX_LINES ? `SLICE MODE: first ${MAX_LINES.toLocaleString()} lines per pass` : 'FULL RUN'}${CHECK_ONLY ? '  [--check: nothing will be written]' : ''}`);
 
-// CREATE TABLE IF NOT EXISTS is a no-op on an existing file, so a v0.5 database
-// would sail through pass 1 and then die on the first INSERT hours later.
-{
+// ---------- database (opened by main; --check never writes) ----------
+let db!: InstanceType<typeof Database>;
+function openDb(): void {
+  db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('foreign_keys = OFF');
+  db.exec(readFileSync(join(__dirname, 'schema.sql'), 'utf8'));
+  // schema.sql opens with PRAGMA foreign_keys = ON, which re-enables enforcement on
+  // this connection. Pass 2 writes events.place_id / places.parent_id BEFORE (or
+  // without ever) meeting the referenced place in the stream, so enforcement must
+  // stay off for the build. Consumers open the file with SQLite's default (off).
+  db.pragma('foreign_keys = OFF');
+
+  // CREATE TABLE IF NOT EXISTS is a no-op on an existing file, so a v0.5 database
+  // would sail through pass 1 and then die on the first INSERT hours later.
   const cols = new Set((db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>).map((c) => c.name));
-  for (const c of ['date_end', 'coord_source', 'category_root', 'wikidata_types', 'sitelinks', 'country_id', 'participants', 'deaths']) {
-    if (!cols.has(c)) {
-      console.error(`${DB_PATH} predates schema v0.6 (missing events.${c}). Ingest into an empty file (Rename-Item events.sqlite events.v05.sqlite) or run: npm run migrate`);
-      process.exit(1);
-    }
+  for (const c of V06_COLUMNS) {
+    if (!cols.has(c)) fail(1, `${DB_PATH} predates schema v0.6 (missing events.${c}).`, 'Ingest into an empty file (Rename-Item events.sqlite events.v05.sqlite) or run: npm run migrate');
   }
-}
 
-// Scratch indexes used only during the build (gitignored DB). Drop them before
-// publishing: sqlite3 events.sqlite "DROP TABLE _coords; DROP TABLE _subclass; VACUUM;"
-db.exec(`CREATE TABLE IF NOT EXISTS _coords (qid TEXT PRIMARY KEY, lat REAL, lng REAL);`);
-db.exec(`CREATE TABLE IF NOT EXISTS _subclass (child TEXT, parent TEXT);`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_subclass_parent ON _subclass(parent);`);
+  // Scratch indexes used only during the build (gitignored DB). Drop them before
+  // publishing: sqlite3 events.sqlite "DROP TABLE _coords; DROP TABLE _subclass; VACUUM;"
+  db.exec(`CREATE TABLE IF NOT EXISTS _coords (qid TEXT PRIMARY KEY, lat REAL, lng REAL);`);
+  db.exec(`CREATE TABLE IF NOT EXISTS _subclass (child TEXT, parent TEXT);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_subclass_parent ON _subclass(parent);`);
+}
 
 // ---------- category definitions (root types + which date props carry the event date) ----------
 // coordMode controls how an event is placed; coord_source on the row records which claim won:
@@ -120,20 +166,27 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_subclass_parent ON _subclass(parent);`);
 type CoordMode = 'p625' | 'p625_then_place' | 'place_first';
 interface CategoryDef { category: string; roots: string[]; dateProps: string[]; floor: number; coordMode?: CoordMode; fallbackFloor?: number; }
 const CATEGORIES: CategoryDef[] = [
-  { category: 'conflict',  roots: ['Q180684', 'Q198', 'Q178561', 'Q831663'],             dateProps: ['P585', 'P580'], floor: 5,  coordMode: 'p625_then_place', fallbackFloor: 20 },
-  { category: 'disaster',  roots: ['Q3839081', 'Q8065', 'Q44512', 'Q12184', 'Q168247', 'Q171558'], dateProps: ['P585', 'P580'], floor: 5, coordMode: 'p625_then_place', fallbackFloor: 12 },
+  { category: 'conflict',  roots: ['Q180684', 'Q198', 'Q178561', 'Q831663', 'Q645883', 'Q10931', 'Q124734', 'Q45382'],             dateProps: ['P585', 'P580'], floor: 5,  coordMode: 'p625_then_place', fallbackFloor: 20 },
+  { category: 'disaster',  roots: ['Q3839081', 'Q8065', 'Q44512', 'Q12184', 'Q168247', 'Q171558', 'Q7944', 'Q8068', 'Q8070', 'Q8092', 'Q81054', 'Q8081', 'Q7692360', 'Q169950', 'Q168983'], dateProps: ['P585', 'P580'], floor: 5, coordMode: 'p625_then_place', fallbackFloor: 12 },
   { category: 'election',  roots: ['Q40231'],                                            dateProps: ['P585', 'P580'], floor: 12, coordMode: 'p625_then_place' },
   { category: 'treaty',    roots: ['Q131569'],                                           dateProps: ['P585', 'P580'], floor: 10, coordMode: 'p625_then_place' },
-  { category: 'founding',  roots: ['Q6256', 'Q3624078', 'Q3024240', 'Q515', 'Q3957', 'Q532', 'Q10864048', 'Q1549591'], dateProps: ['P571'], floor: 5 },
+  { category: 'founding',  roots: ['Q6256', 'Q3624078', 'Q3024240', 'Q515', 'Q3957', 'Q532', 'Q10864048', 'Q1549591', 'Q3918'], dateProps: ['P571'], floor: 5 },
   { category: 'discovery', roots: ['Q12772819', 'Q11019'],                               dateProps: ['P575', 'P571'], floor: 3 },
   { category: 'milestone', roots: ['Q5916', 'Q495307'],                                  dateProps: ['P585', 'P580', 'P575', 'P571'], floor: 25, coordMode: 'place_first' },
   { category: 'event',     roots: ['Q2223653', 'Q1190554', 'Q1656682'],                  dateProps: ['P585', 'P580'], floor: 8,  coordMode: 'p625_then_place', fallbackFloor: 40 },
 ];
-// conflict roots:  Q180684 conflict, Q198 war, Q178561 battle, Q831663 military campaign
+// conflict roots:  Q180684 conflict, Q198 war, Q178561 battle, Q831663 military campaign, Q645883 military operation
+//                  (sieges, landings, offensives), Q10931 revolution, Q124734 rebellion, Q45382 coup d'etat (v0.6.1): political
+//                  conflicts rarely carry a P625 of their own; as conflicts they get the place fallback at 20 sitelinks, not 40
 // disaster roots:  Q3839081 disaster, Q8065 natural disaster, Q44512 epidemic, Q12184 pandemic, Q168247 famine,
 //                  Q171558 accident (aviation / rail / mining / industrial accidents; floor 5 keeps it to reported ones)
+//                  natural-hazard classes named EXPLICITLY (v0.6.1) because not all descend from Q8065 in Wikidata: Q7944 earthquake,
+//                  Q8068 flood, Q8070 tsunami, Q8092 tropical cyclone, Q81054 storm, Q8081 tornado, Q7692360 volcanic eruption,
+//                  Q169950 wildfire, Q168983 conflagration. Users reported hurricanes and quakes missing from v0.5; a redundant
+//                  root costs nothing (same category), a missing one costs another full pass
 // founding roots:  Q6256 country, Q3624078 sovereign state, Q3024240 historical country, Q515 city, Q3957 town,
-//                  Q532 village, Q10864048 first-level administrative division, Q1549591 big city
+//                  Q532 village, Q10864048 first-level administrative division, Q1549591 big city,
+//                  Q3918 university (v0.6.1: institution foundings for the local tier; rescope-foundings.ts classifies them from the blurb)
 // discovery roots: Q12772819 discovery, Q11019 machine (inventions)
 // milestone roots: Q5916 spaceflight, Q495307 space mission
 // event roots:     Q2223653 terrorist attack (explicit, so it never depends on the occurrence closure), Q1190554 occurrence, Q1656682 event
@@ -165,28 +218,60 @@ const MAX_TYPES = 12;       // P31 values kept per row
 const MAX_SPAN_YEARS = 100; // anything longer is a period or a series, not an event a life overlaps
 
 // ===================== dump streaming =====================
-function streamDump(onEntity: (e: any) => void): Promise<number> {
+interface StreamStats { lines: number; entities: number; }
+interface StreamOptions {
+  // Cheap substring test on the raw line BEFORE JSON.parse; false skips the line.
+  // Must be lossless: reject only lines that cannot yield a kept row. A claim an
+  // entity carries always appears in its JSON as the quoted property id ("P625").
+  prefilter?: (raw: string) => boolean;
+  maxLines?: number; // default INGEST_MAX_LINES; 0 = the whole dump
+  label?: string;    // progress-line prefix
+}
+const SANITY_LINES = 20000; // a real dump yields matching entities long before this many lines
+
+function streamDump(onEntity: (e: any) => void, opts: StreamOptions = {}): Promise<StreamStats> {
+  const maxLines = opts.maxLines ?? MAX_LINES;
+  const t0 = Date.now();
   return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: fs.createReadStream(DUMP as string).pipe(zlib.createGunzip()),
-      crlfDelay: Infinity,
-    });
+    const file = fs.createReadStream(dump.path);
+    const gunzip = zlib.createGunzip();
     let n = 0;
-    rl.on('line', (raw) => {
+    let entities = 0;
+    let settled = false;
+    let rl: ReturnType<typeof readline.createInterface> | undefined;
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      rl?.close();
+      file.destroy();
+      if (err) reject(err); else resolve({ lines: n, entities });
+    };
+    file.on('error', (err: Error) => finish(new Error(`Cannot read ${dump.path}: ${err.message}`)));
+    gunzip.on('error', (err: Error) => finish(new Error(`${dump.path} stopped being readable gzip after ${n.toLocaleString()} lines (${err.message}). Incomplete download?`)));
+    const progress = (): void => {
+      const pct = dump.size ? (file.bytesRead / dump.size) * 100 : 0;
+      const elapsed = Date.now() - t0;
+      const eta = pct > 0.05 ? (elapsed * (100 - pct)) / pct : NaN;
+      console.log(`  ...${opts.label ?? 'scanned'} ${n.toLocaleString()} lines | ${pct.toFixed(1)}% of dump | ${fmtDur(elapsed)} elapsed${Number.isFinite(eta) ? ` | ~${fmtDur(eta)} left in this pass` : ''}`);
+    };
+    rl = readline.createInterface({ input: file.pipe(gunzip), crlfDelay: Infinity });
+    rl.on('line', (raw: string) => {
+      if (settled) return;
       n++;
-      const line = raw.trim().replace(/,$/, '');
-      if (line.length < 2 || line === '[' || line === ']') { maybeStop(); return; }
-      let e: any;
-      try { e = JSON.parse(line); } catch { maybeStop(); return; }
-      if (e && e.type === 'item' && typeof e.id === 'string' && e.id[0] === 'Q') onEntity(e);
-      maybeStop();
-      function maybeStop() {
-        if (n % 500000 === 0) console.log(`  ...scanned ${n.toLocaleString()} lines`);
-        if (MAX_LINES && n >= MAX_LINES) rl.close();
+      if (n % 500000 === 0) progress();
+      if (!opts.prefilter || opts.prefilter(raw)) {
+        const line = raw.trim().replace(/,$/, '');
+        if (line.length >= 2 && line !== '[' && line !== ']') {
+          try {
+            const e: any = JSON.parse(line);
+            if (e && e.type === 'item' && typeof e.id === 'string' && e.id[0] === 'Q') { entities++; onEntity(e); }
+          } catch { /* not an entity line */ }
+        }
       }
+      if (n === SANITY_LINES && entities === 0) finish(new Error(`No usable Wikidata entities in the first ${SANITY_LINES.toLocaleString()} lines of ${dump.path}. Not a latest-all.json.gz dump?`));
+      else if (maxLines && n >= maxLines) finish();
     });
-    rl.on('close', () => resolve(n));
-    rl.on('error', reject);
+    rl.on('close', () => finish());
   });
 }
 
@@ -305,6 +390,8 @@ function runCoordsPass(): Promise<number> {
   let batch = 0;
   db.exec('BEGIN');
   const flush = () => { if (++batch % 50000 === 0) { db.exec('COMMIT'); db.exec('BEGIN'); } };
+  // Lossless prefilter: an entity with a P625 or P279 claim always has the quoted id in its line.
+  const wanted = (raw: string): boolean => raw.includes('"P625"') || raw.includes('"P279"');
   return streamDump((e) => {
     const coord = firstCoordinate(e);
     if (coord) { insCoord.run(e.id, coord.lat, coord.lng); flush(); }
@@ -312,10 +399,12 @@ function runCoordsPass(): Promise<number> {
       const parent = c?.mainsnak?.datavalue?.value?.id;
       if (parent) { insSub.run(e.id, parent); flush(); }
     }
-  }).then((n) => {
+  }, { prefilter: wanted, label: 'pass 1' }).then(({ lines: n, entities }) => {
     db.exec('COMMIT');
-    const coords = (db.prepare('SELECT COUNT(*) AS c FROM _coords').get() as any).c;
-    console.log(`Pass 1 done: ${n.toLocaleString()} lines, ${coords.toLocaleString()} geo-entities indexed.`);
+    const coords = (db.prepare('SELECT COUNT(*) AS c FROM _coords').get() as any).c as number;
+    const edges = (db.prepare('SELECT COUNT(*) AS c FROM _subclass').get() as any).c as number;
+    console.log(`Pass 1 done: ${n.toLocaleString()} lines, ${entities.toLocaleString()} entities parsed, ${coords.toLocaleString()} geo-entities indexed, ${edges.toLocaleString()} subclass edges.`);
+    if (coords === 0 || edges === 0) throw new Error(`Pass 1 indexed ${coords} coordinates and ${edges} subclass edges from ${n.toLocaleString()} lines: the dump is unreadable or not Wikidata. Refusing to continue.`);
     return n;
   });
 }
@@ -361,6 +450,13 @@ function buildPlaceIndex(): Map<string, PlaceLevel> {
 // ===================== PASS 2: extract events =====================
 function runEventsPass(typeIndex: Map<string, TypeHit>, placeIndex: Map<string, PlaceLevel>): Promise<number> {
   console.log('Pass 2: extracting events with date precision (+ harvesting countries / admin divisions into places)...');
+  // Clean rebuild: every scripted row goes, seed rows stay (post-ingest re-promotes
+  // the universal tier and re-expands participants). Makes INGEST_PASS=events reruns safe.
+  {
+    const gone = db.prepare(`DELETE FROM events WHERE ingest_version IS NULL OR ingest_version NOT LIKE 'seed-%'`).run().changes;
+    const places = db.prepare('DELETE FROM places').run().changes;
+    if (gone || places) console.log(`  cleared ${gone.toLocaleString()} scripted rows and ${places.toLocaleString()} places left by a previous run.`);
+  }
   const catByName = new Map(CATEGORIES.map((c) => [c.category, c]));
   const getCoord = db.prepare('SELECT lat, lng FROM _coords WHERE qid = ?');
   const insPlace = db.prepare(`
@@ -421,6 +517,11 @@ function runEventsPass(typeIndex: Map<string, TypeHit>, placeIndex: Map<string, 
     flush();
   };
 
+  // Lossless prefilter: a kept event needs one of the date properties, a kept person
+  // needs P569/P570, a useful place needs a P625 centroid or a P131 parent. Everything
+  // else (tens of millions of scholarly articles, genes, stars) is skipped unparsed.
+  const P2_KEYS = ['"P585"', '"P580"', '"P571"', '"P575"', '"P569"', '"P570"', '"P625"', '"P131"'];
+  const wanted = (raw: string): boolean => { for (const k of P2_KEYS) if (raw.includes(k)) return true; return false; };
   return streamDump((e) => {
     const types = instanceIds(e);
     if (types.length === 0) return;
@@ -507,28 +608,52 @@ function runEventsPass(typeIndex: Map<string, TypeHit>, placeIndex: Map<string, 
       participants: participantsOf(e, PARTICIPANT_PROPS[def.category]),
       deaths: firstQuantity(e, 'P1120'),
     });
-  }).then((n) => {
+  }, { prefilter: wanted, label: 'pass 2' }).then(({ lines: n, entities }) => {
     db.exec('COMMIT');
-    console.log(`Pass 2 done: scanned ${n.toLocaleString()} lines, inserted ${kept.toLocaleString()} events, ${placesKept.toLocaleString()} places.`);
+    console.log(`Pass 2 done: scanned ${n.toLocaleString()} lines, parsed ${entities.toLocaleString()} entities, inserted ${kept.toLocaleString()} events, ${placesKept.toLocaleString()} places.`);
     console.log('  placed by: ' + Object.entries(bySource).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v.toLocaleString()}`).join('  '));
+    if (kept === 0) throw new Error(`Pass 2 inserted ZERO events from ${n.toLocaleString()} lines (${entities.toLocaleString()} entities parsed). Check the window ${START_YEAR}-${END_YEAR} and that pass 1 ran on this same file.`);
     return n;
   });
 }
 
+// ===================== --check: validate + report, write nothing =====================
+async function checkOnly(): Promise<void> {
+  const sample: string[] = [];
+  const s = await streamDump((e) => { if (sample.length < 3) sample.push(`${e.id} '${e.labels?.en?.value ?? '?'}'`); }, { maxLines: 300, label: 'check' });
+  if (s.entities === 0) fail(1, `No Wikidata entities in the first ${s.lines} lines of ${dump.path}. Not a latest-all.json.gz dump?`);
+  console.log(`  dump OK: ${s.entities} entities in the first ${s.lines} lines (${sample.join(', ')}).`);
+  if (!fs.existsSync(DB_PATH)) { console.log(`  db: ${DB_PATH} does not exist yet -> a fresh v0.6 file will be created. Ready for npm run ingest:dump.`); return; }
+  const ro = new Database(DB_PATH, { readonly: true });
+  const cols = new Set((ro.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>).map((c) => c.name));
+  if (cols.size === 0) { console.log(`  db: ${DB_PATH} exists but has no events table (empty file). Ready.`); ro.close(); return; }
+  const missing = V06_COLUMNS.filter((c) => !cols.has(c));
+  if (missing.length) { ro.close(); fail(1, `${DB_PATH} is PRE-v0.6 (missing ${missing.join(', ')}).`, 'Move it aside (Rename-Item events.sqlite events.v05.sqlite) so the ingest starts from an empty file.'); }
+  const rows = ro.prepare(`SELECT COALESCE(ingest_version, '(null)') AS ingest_version, COUNT(*) AS n FROM events GROUP BY 1 ORDER BY 2 DESC`).all() as Array<{ ingest_version: string; n: number }>;
+  const scratch = (ro.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name IN ('_coords', '_subclass')`).get() as any).c as number;
+  console.log(`  db: ${DB_PATH} is v0.6. ${rows.length ? rows.map((r) => `${r.ingest_version}=${r.n.toLocaleString()}`).join('  ') : 'no events yet'}; pass-1 scratch tables ${scratch === 2 ? 'present (INGEST_PASS=events possible)' : 'absent'}.`);
+  const dumpRows = rows.filter((r) => !r.ingest_version.startsWith('seed-')).reduce((acc, r) => acc + r.n, 0);
+  if (dumpRows > 0) console.warn(`  NOTE: ${dumpRows.toLocaleString()} scripted rows already present; pass 2 deletes and rebuilds them.`);
+  ro.close();
+}
+
 // ===================== main =====================
 (async () => {
+  if (CHECK_ONLY) { await checkOnly(); console.log('--check passed.'); return; }
   const t0 = Date.now();
+  openDb();
   if (PASS === 'all' || PASS === 'coords') await runCoordsPass();
+  else if ((db.prepare('SELECT COUNT(*) AS c FROM _subclass').get() as any).c === 0) fail(1, 'INGEST_PASS=events needs the pass-1 scratch tables (_coords, _subclass) already in this database.', 'Run the coords pass (or a full run) first.');
   const typeIndex = buildTypeIndex();
   const placeIndex = buildPlaceIndex();
   if (PASS === 'all' || PASS === 'events') await runEventsPass(typeIndex, placeIndex);
 
-  // Rebuild FTS + stamp provenance.
+  // Rebuild FTS + stamp provenance (only reached on success).
   db.exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild');`);
   const setMeta = db.prepare(`INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
   setMeta.run('dataset_version', INGEST_VERSION);
   setMeta.run('window', `${START_YEAR}-${END_YEAR}`);
-  setMeta.run('ingest_dump', basename(DUMP as string));
+  setMeta.run('ingest_dump', basename(dump.path));
   setMeta.run('ingest_finished', new Date().toISOString());
   if (MAX_LINES) setMeta.run('ingest_max_lines', String(MAX_LINES));
 
@@ -550,6 +675,6 @@ function runEventsPass(typeIndex: Map<string, TypeHit>, placeIndex: Map<string, 
     SELECT level, COUNT(*) AS rows_, SUM(lat IS NOT NULL) AS with_coord, SUM(parent_id IS NOT NULL) AS with_parent
     FROM places GROUP BY level ORDER BY rows_ DESC
   `).all());
-  console.log(`Elapsed: ${Math.round((Date.now() - t0) / 1000)}s. Next: npm run post-ingest   (seed, prune, rescope, score, expand:participants, score, titles)`);
+  console.log(`Elapsed: ${fmtDur(Date.now() - t0)}. Next: keep a copy of the raw ingest (Copy-Item events.sqlite events.v06-raw.sqlite), then npm run post-ingest   (seed, prune, rescope, score, expand:participants, score, titles)`);
   db.close();
-})().catch((err) => { console.error(err); process.exit(1); });
+})().catch((err) => fail(1, String((err as Error)?.message ?? err), 'The database was NOT stamped; do not run post-ingest on it. Fix the cause and re-run npm run ingest:dump.'));

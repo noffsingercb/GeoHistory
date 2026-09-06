@@ -8,6 +8,7 @@
   "scripts": {
     "ingest": "tsx ingest.ts",
     "ingest:dump": "tsx ingest-dump.ts",
+    "ingest:check": "tsx ingest-dump.ts --check",
     "migrate": "tsx migrate-v06.ts",
     "seed": "tsx seed.ts",
     "expand:participants": "tsx expand-participants.ts",
