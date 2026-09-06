@@ -8,10 +8,13 @@ import Database from 'better-sqlite3';
 // engine, seed and scorer can be exercised on the currently shipped data before
 // the full dump re-ingest finishes (that run takes hours; this takes seconds).
 //
-//   - appends coord_source, category_root, wikidata_types, sitelinks
+//   - appends coord_source, category_root, wikidata_types, sitelinks, country_id,
+//     participants, deaths (the last three stay NULL: only the dump carries them,
+//     so expand-participants.ts is a no-op on a migrated file)
 //   - rebuilds the events table so the CHECK constraints admit scope='universal'
-//     and founding_kind='institution' (SQLite cannot ALTER a CHECK, so the table
-//     is copied, dropped and renamed; rowids are preserved for the FTS index)
+//     and founding_kind='institution' / 'city' (SQLite cannot ALTER a CHECK, so the
+//     table is copied, dropped and renamed; rowids are preserved for the FTS index)
+//   - creates the v0.6 indexes (idx_events_end_year, idx_events_country, ...)
 //   - backfills sitelinks from notability (notability = min(1, sitelinks/100),
 //     so anything at 1.0 is a lower bound and is flagged in meta)
 //
@@ -21,7 +24,7 @@ import Database from 'better-sqlite3';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.GEOHISTORY_DB ?? 'events.sqlite';
-const NEW_COLUMNS = ['coord_source', 'category_root', 'wikidata_types', 'sitelinks'];
+const NEW_COLUMNS = ['coord_source', 'category_root', 'wikidata_types', 'sitelinks', 'country_id', 'participants', 'deaths'];
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -36,7 +39,7 @@ const columnsOf = (table: string) =>
 const currentDdl = (db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'`).get() as { sql: string } | undefined)?.sql ?? '';
 
 const missing = NEW_COLUMNS.filter((c) => !columnsOf('events').includes(c));
-const checksStale = !currentDdl.includes("'universal'") || !currentDdl.includes("'institution'");
+const checksStale = !currentDdl.includes("'universal'") || !currentDdl.includes("'institution'") || !currentDdl.includes("'city'");
 
 if (missing.length === 0 && !checksStale) {
   console.log(`${DB_PATH} is already on schema v0.6; nothing to do.`);

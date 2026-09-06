@@ -18,8 +18,17 @@ import Database from 'better-sqlite3';
 //   https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.gz
 //
 // Usage (PowerShell): point WIKIDATA_DUMP at the dump, then: npm run ingest:dump
-// Validate on a slice first via INGEST_MAX_LINES, then run the post-passes:
-//   npm run seed; npm run rescope:foundings; npm run score; npm run titles
+// Validate on a slice first via INGEST_MAX_LINES, then run the post-passes in one go:
+//   npm run post-ingest     (= seed, prune:dupes, prune:series, rescope:foundings,
+//                            score, expand:participants, score, titles)
+//
+// DESIGN RULE (v0.6): a full pass over the dump takes 8-10 hours, so this script
+// only harvests raw, structured facts (dates, coordinates, types, sitelinks,
+// participants, containing places). Every JUDGEMENT -- scope, the recency taper,
+// national-tier rows for overseas wars, display titles, pruning -- lives in the
+// post-ingest scripts, which run in minutes and can be re-run without touching
+// the dump. If a scoring idea needs a fact this script does not keep, add the
+// COLUMN here; never add the judgement.
 //
 // Start from an EMPTY database file (GEOHISTORY_DB, default events.sqlite).
 // Inserts are INSERT OR IGNORE, so a re-run over an existing file keeps every
@@ -42,6 +51,19 @@ import Database from 'better-sqlite3';
 //     Irish Free State 1922, Confederate States 1861
 //   - sitelinks, wikidata_types (P31 list) and category_root kept on every row
 //     so the scorer and the title/kind classifiers stop guessing from prose
+//   - participants (P710; P1891 signatories for treaties) and country_id (P17)
+//     kept as raw QIDs. expand-participants.ts turns 'World War II' into a
+//     national-tier 'World War II - United States' row at the US centroid, so a
+//     war fought overseas still reaches the lives of the countries that fought it
+//   - place_id = P131 containing division (else P17), and the places table is
+//     filled with every country / admin1 / county entity met in the stream, so
+//     display-titles.ts can write 'Founding of Toronto, Ohio' instead of a bare
+//     duplicate, and expand-participants.ts has a name + centroid per country
+//   - accidents (Q171558: air crashes, mine and rail disasters) join the
+//     disaster category, and its floors drop (8 -> 5 sitelinks, fallback 15 -> 12):
+//     users reported well-known disasters missing from v0.5
+//   - terrorist attacks (Q2223653) are an explicit event root
+//   - deaths (P1120) kept raw for later scoring experiments
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -63,12 +85,17 @@ db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = OFF');
 db.exec(readFileSync(join(__dirname, 'schema.sql'), 'utf8'));
+// schema.sql opens with PRAGMA foreign_keys = ON, which re-enables enforcement on
+// this connection. Pass 2 writes events.place_id / places.parent_id BEFORE (or
+// without ever) meeting the referenced place in the stream, so enforcement must
+// stay off for the build. Consumers open the file with SQLite's default (off).
+db.pragma('foreign_keys = OFF');
 
 // CREATE TABLE IF NOT EXISTS is a no-op on an existing file, so a v0.5 database
 // would sail through pass 1 and then die on the first INSERT hours later.
 {
   const cols = new Set((db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>).map((c) => c.name));
-  for (const c of ['date_end', 'coord_source', 'category_root', 'wikidata_types', 'sitelinks']) {
+  for (const c of ['date_end', 'coord_source', 'category_root', 'wikidata_types', 'sitelinks', 'country_id', 'participants', 'deaths']) {
     if (!cols.has(c)) {
       console.error(`${DB_PATH} predates schema v0.6 (missing events.${c}). Ingest into an empty file (Rename-Item events.sqlite events.v05.sqlite) or run: npm run migrate`);
       process.exit(1);
@@ -94,22 +121,43 @@ type CoordMode = 'p625' | 'p625_then_place' | 'place_first';
 interface CategoryDef { category: string; roots: string[]; dateProps: string[]; floor: number; coordMode?: CoordMode; fallbackFloor?: number; }
 const CATEGORIES: CategoryDef[] = [
   { category: 'conflict',  roots: ['Q180684', 'Q198', 'Q178561', 'Q831663'],             dateProps: ['P585', 'P580'], floor: 5,  coordMode: 'p625_then_place', fallbackFloor: 20 },
-  { category: 'disaster',  roots: ['Q3839081', 'Q8065', 'Q44512', 'Q12184', 'Q168247'], dateProps: ['P585', 'P580'], floor: 8,  coordMode: 'p625_then_place', fallbackFloor: 15 },
+  { category: 'disaster',  roots: ['Q3839081', 'Q8065', 'Q44512', 'Q12184', 'Q168247', 'Q171558'], dateProps: ['P585', 'P580'], floor: 5, coordMode: 'p625_then_place', fallbackFloor: 12 },
   { category: 'election',  roots: ['Q40231'],                                            dateProps: ['P585', 'P580'], floor: 12, coordMode: 'p625_then_place' },
   { category: 'treaty',    roots: ['Q131569'],                                           dateProps: ['P585', 'P580'], floor: 10, coordMode: 'p625_then_place' },
   { category: 'founding',  roots: ['Q6256', 'Q3624078', 'Q3024240', 'Q515', 'Q3957', 'Q532', 'Q10864048', 'Q1549591'], dateProps: ['P571'], floor: 5 },
   { category: 'discovery', roots: ['Q12772819', 'Q11019'],                               dateProps: ['P575', 'P571'], floor: 3 },
   { category: 'milestone', roots: ['Q5916', 'Q495307'],                                  dateProps: ['P585', 'P580', 'P575', 'P571'], floor: 25, coordMode: 'place_first' },
-  { category: 'event',     roots: ['Q1190554', 'Q1656682'],                              dateProps: ['P585', 'P580'], floor: 8,  coordMode: 'p625_then_place', fallbackFloor: 40 },
+  { category: 'event',     roots: ['Q2223653', 'Q1190554', 'Q1656682'],                  dateProps: ['P585', 'P580'], floor: 8,  coordMode: 'p625_then_place', fallbackFloor: 40 },
 ];
 // conflict roots:  Q180684 conflict, Q198 war, Q178561 battle, Q831663 military campaign
-// disaster roots:  Q3839081 disaster, Q8065 natural disaster, Q44512 epidemic, Q12184 pandemic, Q168247 famine
+// disaster roots:  Q3839081 disaster, Q8065 natural disaster, Q44512 epidemic, Q12184 pandemic, Q168247 famine,
+//                  Q171558 accident (aviation / rail / mining / industrial accidents; floor 5 keeps it to reported ones)
 // founding roots:  Q6256 country, Q3624078 sovereign state, Q3024240 historical country, Q515 city, Q3957 town,
 //                  Q532 village, Q10864048 first-level administrative division, Q1549591 big city
 // discovery roots: Q12772819 discovery, Q11019 machine (inventions)
 // milestone roots: Q5916 spaceflight, Q495307 space mission
-// event roots:     Q1190554 occurrence, Q1656682 event
+// event roots:     Q2223653 terrorist attack (explicit, so it never depends on the occurrence closure), Q1190554 occurrence, Q1656682 event
 const RANGED = new Set(['conflict', 'disaster', 'event', 'milestone']); // categories whose P582 becomes date_end
+
+// Which claim lists an event's participating parties, per category. Stored raw
+// (QIDs, capped); expand-participants.ts resolves them against places.
+const PARTICIPANT_PROPS: Record<string, string[]> = {
+  conflict: ['P710'],          // participant
+  treaty:   ['P1891', 'P710'], // signatory, else participant
+  event:    ['P710'],
+  disaster: ['P710'],
+};
+const MAX_PARTICIPANTS = 64;
+
+// places harvest (pass 2): P31 closure roots -> places.level. A row here is NOT an
+// event; it is the containment chain events point into via place_id / country_id.
+// Order = priority (first hit wins): a city-state typed both country and city is a country.
+const PLACE_LEVELS: Array<{ level: 'country' | 'admin1' | 'county'; roots: string[] }> = [
+  { level: 'country', roots: ['Q6256', 'Q3624078', 'Q3024240', 'Q1763527'] }, // country, sovereign state, historical country, constituent country
+  { level: 'admin1',  roots: ['Q10864048'] },                                 // first-level administrative division (US state, province, oblast)
+  { level: 'county',  roots: ['Q13220204'] },                                 // second-level administrative division (county, district, arrondissement)
+];
+const MAX_ALIASES = 8;
 const HUMAN_FLOOR = 30; // sitelink floor for births/deaths (keeps the file to notable people)
 const EARTH_GLOBE = 'http://www.wikidata.org/entity/Q2';
 const PLACE_PROPS = ['P276', 'P17', 'P495']; // location, country, country of origin -- in fallback order
@@ -163,6 +211,43 @@ function firstCoordinate(e: any): { lat: number; lng: number } | null {
 
 function firstItemId(e: any, prop: string): string | null {
   return (e.claims?.[prop] ?? [])[0]?.mainsnak?.datavalue?.value?.id ?? null;
+}
+
+// Every item-valued claim of a property, in statement order, de-duplicated.
+function itemIds(e: any, prop: string, max = MAX_PARTICIPANTS): string[] {
+  const out: string[] = [];
+  for (const c of (e.claims?.[prop] ?? [])) {
+    const id = c?.mainsnak?.datavalue?.value?.id;
+    if (typeof id === 'string' && id[0] === 'Q' && !out.includes(id)) {
+      out.push(id);
+      if (out.length >= max) break;
+    }
+  }
+  return out;
+}
+
+// First value among several properties, as a JSON array string, or null when none.
+function participantsOf(e: any, props: string[] | undefined): string | null {
+  if (!props) return null;
+  for (const p of props) {
+    const ids = itemIds(e, p);
+    if (ids.length) return JSON.stringify(ids);
+  }
+  return null;
+}
+
+// First quantity claim as an integer (Wikidata amounts are signed decimal strings: "+50000000").
+function firstQuantity(e: any, prop: string): number | null {
+  const v = (e.claims?.[prop] ?? [])[0]?.mainsnak?.datavalue?.value;
+  if (!v || typeof v.amount !== 'string') return null;
+  const n = Number(v.amount);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+}
+
+// English aliases, capped, for places.aliases.
+function aliasesOf(e: any): string | null {
+  const list = (e.aliases?.en ?? []).map((a: any) => a?.value).filter((s: any) => typeof s === 'string').slice(0, MAX_ALIASES);
+  return list.length ? JSON.stringify(list) : null;
 }
 
 type Precision = 'day' | 'month' | 'year' | 'decade' | 'century';
@@ -235,11 +320,10 @@ function runCoordsPass(): Promise<number> {
   });
 }
 
-// ---------- closure: expand each category's roots into descendant type sets ----------
-interface TypeHit { category: string; root: string; }
-function buildTypeIndex(): Map<string, TypeHit> {
-  console.log('Closure: expanding category root types via P279* ...');
-  const map = new Map<string, TypeHit>();
+// ---------- closure: expand root types into descendant type sets ----------
+// Priority order = definition order, then roots order; first assignment wins.
+function closureIndex<V, T>(groups: Array<{ value: V; roots: string[] }>, make: (value: V, root: string) => T): Map<string, T> {
+  const map = new Map<string, T>();
   const closure = db.prepare(`
     WITH RECURSIVE d(q) AS (
       SELECT @root
@@ -248,25 +332,42 @@ function buildTypeIndex(): Map<string, TypeHit> {
     )
     SELECT q FROM d
   `);
-  // Priority order = CATEGORIES order, then roots order; first assignment wins
-  // (conflict before disaster before event, etc.). The winning root is kept on
-  // the row as category_root.
-  for (const def of CATEGORIES) {
-    for (const root of def.roots) {
+  for (const g of groups) {
+    for (const root of g.roots) {
       for (const row of closure.all({ root }) as Array<{ q: string }>) {
-        if (!map.has(row.q)) map.set(row.q, { category: def.category, root });
+        if (!map.has(row.q)) map.set(row.q, make(g.value, root));
       }
     }
   }
+  return map;
+}
+
+interface TypeHit { category: string; root: string; }
+function buildTypeIndex(): Map<string, TypeHit> {
+  console.log('Closure: expanding category root types via P279* ...');
+  // conflict before disaster before event, etc. The winning root is kept on the row as category_root.
+  const map = closureIndex(CATEGORIES.map((def) => ({ value: def.category, roots: def.roots })), (category, root) => ({ category, root }));
   console.log(`Closure done: ${map.size.toLocaleString()} type QIDs mapped to categories.`);
   return map;
 }
 
+type PlaceLevel = 'country' | 'admin1' | 'county';
+function buildPlaceIndex(): Map<string, PlaceLevel> {
+  const map = closureIndex(PLACE_LEVELS.map((p) => ({ value: p.level, roots: p.roots })), (level) => level);
+  console.log(`Closure done: ${map.size.toLocaleString()} type QIDs mapped to place levels.`);
+  return map;
+}
+
 // ===================== PASS 2: extract events =====================
-function runEventsPass(typeIndex: Map<string, TypeHit>): Promise<number> {
-  console.log('Pass 2: extracting events with date precision...');
+function runEventsPass(typeIndex: Map<string, TypeHit>, placeIndex: Map<string, PlaceLevel>): Promise<number> {
+  console.log('Pass 2: extracting events with date precision (+ harvesting countries / admin divisions into places)...');
   const catByName = new Map(CATEGORIES.map((c) => [c.category, c]));
   const getCoord = db.prepare('SELECT lat, lng FROM _coords WHERE qid = ?');
+  const insPlace = db.prepare(`
+    INSERT OR IGNORE INTO places (id, name, level, parent_id, lat, lng, aliases)
+    VALUES (@id, @name, @level, @parent_id, @lat, @lng, @aliases)
+  `);
+  let placesKept = 0;
 
   interface Placed { lat: number; lng: number; source: string; }
   const ownCoord = (e: any): Placed | null => {
@@ -296,11 +397,11 @@ function runEventsPass(typeIndex: Map<string, TypeHit>): Promise<number> {
 
   const insEvent = db.prepare(`
     INSERT OR IGNORE INTO events
-      (id, title, blurb, date_start, date_end, date_precision, lat, lng, coord_source,
-       category, category_root, wikidata_types, sitelinks, notability, source_url, source_ids, ingest_version)
+      (id, title, blurb, date_start, date_end, date_precision, lat, lng, coord_source, place_id, country_id,
+       category, category_root, wikidata_types, sitelinks, notability, participants, deaths, source_url, source_ids, ingest_version)
     VALUES
-      (@id, @title, @blurb, @date_start, @date_end, @date_precision, @lat, @lng, @coord_source,
-       @category, @category_root, @wikidata_types, @sitelinks, @notability, @source_url, @source_ids, @ingest_version)
+      (@id, @title, @blurb, @date_start, @date_end, @date_precision, @lat, @lng, @coord_source, @place_id, @country_id,
+       @category, @category_root, @wikidata_types, @sitelinks, @notability, @participants, @deaths, @source_url, @source_ids, @ingest_version)
   `);
 
   let kept = 0;
@@ -327,29 +428,54 @@ function runEventsPass(typeIndex: Map<string, TypeHit>): Promise<number> {
     const title = e.labels?.en?.value;
     if (!title) return;
     const blurb = e.descriptions?.en?.value ?? null;
+    const country_id = firstItemId(e, 'P17');
     const common = {
       title,
       blurb,
       wikidata_types: JSON.stringify(types.slice(0, MAX_TYPES)),
       sitelinks: sl,
       notability: notabilityOf(sl),
+      country_id,
+      participants: null as string | null,
+      deaths: null as number | null,
       source_url: sourceUrl(e),
       source_ids: JSON.stringify({ wikidata: e.id }),
       ingest_version: INGEST_VERSION,
     };
+
+    // --- places: countries / first- and second-level divisions (no date or floor test) ---
+    // Not a return: the same entity is usually ALSO a founding event below.
+    {
+      let level: PlaceLevel | undefined;
+      for (const t of types) { level = placeIndex.get(t); if (level) break; }
+      if (level) {
+        const co = firstCoordinate(e);
+        const parentRaw = firstItemId(e, 'P131') ?? country_id;
+        const parent_id = parentRaw && parentRaw !== e.id ? parentRaw : null; // countries list themselves as P17
+        try {
+          const r = insPlace.run({ id: e.id, name: title, level, parent_id, lat: co?.lat ?? null, lng: co?.lng ?? null, aliases: aliasesOf(e) });
+          if (r.changes) { placesKept++; flush(); }
+        } catch (err) {
+          // A bad place row must never abort an 8-hour run; the events side does not depend on it.
+          console.warn(`  places: skipped ${e.id} (${title}): ${(err as Error).message}`);
+        }
+      }
+    }
 
     // --- humans: births + deaths (coords resolved from birth/death place) ---
     if (types.includes('Q5')) {
       if (sl < HUMAN_FLOOR) return;
       const birth = parseTimeClaim(e, ['P569']);
       if (birth && inWindow(birth.year)) {
-        const co = refCoord(firstItemId(e, 'P19'), 'P19');
-        if (co) add({ ...common, id: `${e.id}#birth`, date_start: birth.iso, date_end: null, date_precision: birth.precision, lat: co.lat, lng: co.lng, coord_source: co.source, category: 'birth', category_root: 'Q5' });
+        const place = firstItemId(e, 'P19');
+        const co = refCoord(place, 'P19');
+        if (co) add({ ...common, id: `${e.id}#birth`, date_start: birth.iso, date_end: null, date_precision: birth.precision, lat: co.lat, lng: co.lng, coord_source: co.source, place_id: place, category: 'birth', category_root: 'Q5' });
       }
       const death = parseTimeClaim(e, ['P570']);
       if (death && inWindow(death.year)) {
-        const co = refCoord(firstItemId(e, 'P20'), 'P20');
-        if (co) add({ ...common, id: `${e.id}#death`, date_start: death.iso, date_end: null, date_precision: death.precision, lat: co.lat, lng: co.lng, coord_source: co.source, category: 'death', category_root: 'Q5' });
+        const place = firstItemId(e, 'P20');
+        const co = refCoord(place, 'P20');
+        if (co) add({ ...common, id: `${e.id}#death`, date_start: death.iso, date_end: null, date_precision: death.precision, lat: co.lat, lng: co.lng, coord_source: co.source, place_id: place, category: 'death', category_root: 'Q5' });
       }
       return;
     }
@@ -375,12 +501,15 @@ function runEventsPass(typeIndex: Map<string, TypeHit>): Promise<number> {
       lat: coord.lat,
       lng: coord.lng,
       coord_source: coord.source,
+      place_id: firstItemId(e, 'P131') ?? country_id, // containing division, else the country
       category: def.category,
       category_root: hit.root,
+      participants: participantsOf(e, PARTICIPANT_PROPS[def.category]),
+      deaths: firstQuantity(e, 'P1120'),
     });
   }).then((n) => {
     db.exec('COMMIT');
-    console.log(`Pass 2 done: scanned ${n.toLocaleString()} lines, inserted ${kept.toLocaleString()} events.`);
+    console.log(`Pass 2 done: scanned ${n.toLocaleString()} lines, inserted ${kept.toLocaleString()} events, ${placesKept.toLocaleString()} places.`);
     console.log('  placed by: ' + Object.entries(bySource).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v.toLocaleString()}`).join('  '));
     return n;
   });
@@ -391,7 +520,8 @@ function runEventsPass(typeIndex: Map<string, TypeHit>): Promise<number> {
   const t0 = Date.now();
   if (PASS === 'all' || PASS === 'coords') await runCoordsPass();
   const typeIndex = buildTypeIndex();
-  if (PASS === 'all' || PASS === 'events') await runEventsPass(typeIndex);
+  const placeIndex = buildPlaceIndex();
+  if (PASS === 'all' || PASS === 'events') await runEventsPass(typeIndex, placeIndex);
 
   // Rebuild FTS + stamp provenance.
   db.exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild');`);
@@ -409,11 +539,17 @@ function runEventsPass(typeIndex: Map<string, TypeHit>): Promise<number> {
            COUNT(*)                                            AS rows_,
            SUM(date_end IS NOT NULL)                           AS ranged,
            SUM(coord_source IN ('P276', 'P17', 'P495'))        AS fallback_coord,
+           SUM(participants IS NOT NULL)                       AS with_participants,
+           SUM(place_id IS NOT NULL)                           AS with_place,
            ROUND(AVG(sitelinks), 1)                            AS avg_sitelinks
     FROM events
     GROUP BY category
     ORDER BY rows_ DESC
   `).all());
-  console.log(`Elapsed: ${Math.round((Date.now() - t0) / 1000)}s. Next: npm run seed; npm run rescope:foundings; npm run score; npm run titles`);
+  console.table(db.prepare(`
+    SELECT level, COUNT(*) AS rows_, SUM(lat IS NOT NULL) AS with_coord, SUM(parent_id IS NOT NULL) AS with_parent
+    FROM places GROUP BY level ORDER BY rows_ DESC
+  `).all());
+  console.log(`Elapsed: ${Math.round((Date.now() - t0) / 1000)}s. Next: npm run post-ingest   (seed, prune, rescope, score, expand:participants, score, titles)`);
   db.close();
 })().catch((err) => { console.error(err); process.exit(1); });
