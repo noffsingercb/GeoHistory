@@ -44,10 +44,11 @@ import Database from 'better-sqlite3';
 // dates, so the merge pass must run again after any re-ingest -- which is
 // exactly why the verdicts live in version-controlled files rather than in a
 // one-time manual edit. Scoring afterwards is required: removing 312 rows
-// shifts the significance percentiles.
+// shifts the significance percentiles. `npm run post-ingest` sequences all of it.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DRY_RUN = process.argv.includes('--dry-run');
+const DB_PATH = process.env.GEOHISTORY_DB ?? 'events.sqlite';
 
 // The verdict files are committed under seed/dupe/; --dir points elsewhere.
 const dirArg = process.argv.findIndex((a) => a === '--dir');
@@ -83,7 +84,7 @@ function slugify(s: string): string {
 }
 
 function rowId(r: RawRow): string {
-  const explicit = (r['Seed ID'] ?? '').toString().trim();
+  const explicit = (r['Seed ID'] ?? '').toString().trim().replace(/^seed:/, '');
   return `seed:${slugify(explicit || (r.Title ?? '').trim())}`;
 }
 
@@ -130,7 +131,7 @@ console.log(`Verdicts loaded: ${dropPairs.length} drop pairs (${dropIds.size} ro
 if (DRY_RUN) console.log('DRY RUN -- no files or database rows will be modified.\n');
 
 // ---------- Pass 1: patch dump dates, then delete seed rows ----------
-const db = new Database('events.sqlite');
+const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
 const getEvent = db.prepare(`SELECT id, title, date_start, date_precision FROM events WHERE id = ?`);
@@ -188,7 +189,7 @@ const runDelete = db.transaction(() => {
   }
 });
 runDelete();
-console.log(`Seed rows deleted from events.sqlite: ${deleted} (${absent} already absent -- fine on a re-run)`);
+console.log(`Seed rows deleted from ${DB_PATH}: ${deleted} (${absent} already absent -- fine on a re-run)`);
 
 // ---------- Pass 2: rewrite the seed JSON files ----------
 // The DB delete alone is not enough: the next `npm run seed` would put every
