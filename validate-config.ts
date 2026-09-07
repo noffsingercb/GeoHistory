@@ -23,7 +23,15 @@ import type { EngineConfig, Scope } from './core';
 // sparsity retry sends scopeFloor.local (RELAXED_LOCAL_FLOOR) when a segment
 // returns fewer than MIN_MATCHES entries. Clamp, do not delete.
 
-const SCOPES: Scope[] = ['local', 'regional', 'national', 'global'];
+/** Scopes that accept a per-scope significance-floor override, including universal (0.6). */
+const FLOOR_SCOPES: Scope[] = ['local', 'regional', 'national', 'global', 'universal'];
+
+/**
+ * Scopes that participate in the round-robin scopeQuota fill. 'universal' is
+ * deliberately excluded here -- it has its own dedicated universalQuota knob
+ * instead, since core.ts never reads cfg.scopeQuota.universal.
+ */
+const QUOTA_SCOPES: Scope[] = ['local', 'regional', 'national', 'global'];
 
 /** Weight maps are open-keyed by category, so they need their own bounds. */
 const MAX_WEIGHT_KEYS = 40;
@@ -36,7 +44,7 @@ function fail(message: string): never {
 
 /**
  * Bounds are set from what Circa actually sends (src/lib/config.ts:
- * MAX_PER_SEGMENT 17, MAX_SEGMENTS 20, RELAXED_LOCAL_FLOOR 0.05) plus modest
+ * MAX_PER_SEGMENT 19, MAX_SEGMENTS 20, RELAXED_LOCAL_FLOOR 0.05) plus modest
  * headroom for tuning, NOT from what the engine could theoretically survive.
  * A client asking for something outside this range is either broken or
  * hostile, and both deserve the same 400.
@@ -46,6 +54,9 @@ function fail(message: string): never {
  * prefilter to the whole table. See ABSOLUTE_MIN_FLOOR in core.ts, which
  * enforces the same number independently in case a future key lands here
  * without one.
+ *
+ * universalQuota's 0-10 range and personFloor's 0.01-1 range were added in
+ * 0.6 alongside the fields they bound in EngineConfig.
  */
 export const CONFIG_BOUNDS = {
   significanceFloor: { min: 0.01, max: 1, integer: false },
@@ -54,6 +65,8 @@ export const CONFIG_BOUNDS = {
   maxSegments: { min: 1, max: 40, integer: true },
   scopeQuota: { min: 0, max: 25, integer: true },
   personQuota: { min: 0, max: 25, integer: true },
+  universalQuota: { min: 0, max: 10, integer: true },
+  personFloor: { min: 0.01, max: 1, integer: false },
   categoryWeights: { min: 0, max: 1, integer: false },
   foundingKindWeights: { min: 0, max: 1, integer: false },
 } as const;
@@ -81,17 +94,18 @@ function plainObject(name: string, value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** scopeFloor / scopeQuota: keys are closed to the four known scopes. */
+/** scopeFloor / scopeQuota: keys are closed to an explicit allowlist. */
 function scopeMap(
   name: string,
   value: unknown,
   bounds: { min: number; max: number; integer: boolean },
+  allowedScopes: Scope[],
 ): Partial<Record<Scope, number>> {
   const input = plainObject(name, value);
   const out: Partial<Record<Scope, number>> = {};
   for (const [key, raw] of Object.entries(input)) {
-    if (!SCOPES.includes(key as Scope)) {
-      fail(`config.${name} has unknown scope "${key.slice(0, 20)}". Allowed: ${SCOPES.join(', ')}.`);
+    if (!allowedScopes.includes(key as Scope)) {
+      fail(`config.${name} has unknown scope "${key.slice(0, 20)}". Allowed: ${allowedScopes.join(', ')}.`);
     }
     out[key as Scope] = bounds.integer
       ? int(`${name}.${key}`, raw, bounds.min, bounds.max)
@@ -125,11 +139,13 @@ function weightMap(name: string, value: unknown): Record<string, number> {
 
 const VALIDATORS: Record<string, (value: unknown) => unknown> = {
   significanceFloor: (v) => num('significanceFloor', v, CONFIG_BOUNDS.significanceFloor.min, CONFIG_BOUNDS.significanceFloor.max),
-  scopeFloor: (v) => scopeMap('scopeFloor', v, CONFIG_BOUNDS.scopeFloor),
+  scopeFloor: (v) => scopeMap('scopeFloor', v, CONFIG_BOUNDS.scopeFloor, FLOOR_SCOPES),
   maxPerSegment: (v) => int('maxPerSegment', v, CONFIG_BOUNDS.maxPerSegment.min, CONFIG_BOUNDS.maxPerSegment.max),
   maxSegments: (v) => int('maxSegments', v, CONFIG_BOUNDS.maxSegments.min, CONFIG_BOUNDS.maxSegments.max),
-  scopeQuota: (v) => scopeMap('scopeQuota', v, CONFIG_BOUNDS.scopeQuota),
+  scopeQuota: (v) => scopeMap('scopeQuota', v, CONFIG_BOUNDS.scopeQuota, QUOTA_SCOPES),
   personQuota: (v) => int('personQuota', v, CONFIG_BOUNDS.personQuota.min, CONFIG_BOUNDS.personQuota.max),
+  universalQuota: (v) => int('universalQuota', v, CONFIG_BOUNDS.universalQuota.min, CONFIG_BOUNDS.universalQuota.max),
+  personFloor: (v) => num('personFloor', v, CONFIG_BOUNDS.personFloor.min, CONFIG_BOUNDS.personFloor.max),
   categoryWeights: (v) => weightMap('categoryWeights', v),
   foundingKindWeights: (v) => weightMap('foundingKindWeights', v),
 };
@@ -159,12 +175,4 @@ export function validateConfig(raw: unknown): Partial<EngineConfig> | undefined 
   }
 
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(input)) {
-    // An explicit undefined is the same as absent -- JSON cannot produce one,
-    // but a hand-built object can.
-    if (value === undefined) continue;
-    out[key] = VALIDATORS[key](value);
-  }
-
-  return out as Partial<EngineConfig>;
-}
+  for (const [key
