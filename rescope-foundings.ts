@@ -10,7 +10,7 @@ import { isInstitution } from './classify';
 //
 // dump-v0.6 keeps the P31 list on every row (events.wikidata_types), so the kind
 // is now read from STRUCTURE first and from the blurb only as a fallback:
-//   Q515 city / Q1549591 big city           -> city         -> regional (score.ts)
+//   Q515 city / Q1549591 big city           -> city         -> local (score.ts)
 //   Q3957 town / Q532 village               -> settlement   -> local
 //   Q10864048 first-level admin division    -> subnational  -> national
 //   Q6256 / Q3624078 / Q3024240 country     -> country      -> national / global
@@ -64,14 +64,20 @@ const hasTypes = (db.prepare('PRAGMA table_info(events)').all() as Array<{ name:
 type FoundingKind = 'settlement' | 'city' | 'subnational' | 'country' | 'institution';
 
 // P31 -> kind. Mirrors the founding roots in ingest-dump.ts. Only DIRECT types are
-// matched here (the closure lives in the ingest); Wikidata's settlement items carry
-// the concrete class directly in P31 in the vast majority of cases.
+// matched here (the closure lives in the ingest). Q1093829 is the concrete class
+// used by United States city rows, including Q1810731.
+//
+// This structural safety net is preferred over report-only triage: the class and
+// the phrase 'county seat of' unambiguously describe populated places.
+const POPULATED_PLACE_SAFETY_NET_TYPES = new Set(['Q1093829']);
+
 const TYPE_KIND: Record<string, FoundingKind> = {
   Q515: 'city',          // city
   Q1549591: 'city',      // big city
   Q1637706: 'city',      // city with millions of inhabitants
   Q174844: 'city',       // megacity
   Q5119: 'city',         // capital
+  Q1093829: 'city',      // city of the United States
   Q3957: 'settlement',   // town
   Q532: 'settlement',    // village
   Q486972: 'settlement', // human settlement
@@ -86,8 +92,11 @@ const TYPE_KIND: Record<string, FoundingKind> = {
   Q1763527: 'country',   // constituent country
 };
 
+const COUNTY_SEAT_SETTLEMENT = /\bcounty seat of\b/;
+
 // An explicit settlement noun is decisive even when the description also names the
-// containing state or country ("city in the state of Nevada", "capital city of Peru").
+// containing state or country. 'County seat of' describes the populated place
+// serving as the seat, not the founding of the county itself.
 const SETTLEMENT: RegExp[] = [
   /\b(city|cities|town|township|village|hamlet|borough|municipality|commune|settlement|suburb|neighborhood|neighbourhood|metropolis|locality)\b/,
   /\burban (area|district|settlement)\b/,
@@ -96,6 +105,7 @@ const SETTLEMENT: RegExp[] = [
   /\bcapital (city )?of\b/,
   /\bhuman settlement\b/,
   /\bport (city|town)\b/,
+  COUNTY_SEAT_SETTLEMENT,
 ];
 
 // Subnational administrative divisions. Checked BEFORE the generic country rules so
@@ -179,7 +189,7 @@ function classify(types: string[] | null, blurb: string | null): { kind: Foundin
 // reporting only, kept in sync by hand.
 const SCOPE_LABEL: Record<string, string> = {
   settlement: 'local (50-60 km), rank weight 0.35',
-  city: 'regional (210-300 km), rank weight 0.35 until core.ts adds a city weight',
+  city: 'local (50-60 km), rank weight 0.35 until core.ts adds a city weight',
   institution: 'regional (210-300 km) or local, rank weight 0.5',
   subnational: 'national (1,050-1,950 km), rank weight 0.9',
   country: 'national / global (by notability), rank weight 0.9',
@@ -207,14 +217,24 @@ const tally: Record<string, number> = { settlement: 0, city: 0, institution: 0, 
 const via: Record<string, number> = { types: 0, blurb: 0, none: 0 };
 const decided: Array<{ id: string; kind: FoundingKind }> = [];
 const unclassified: Row[] = [];
+let populatedPlaceSafetyNet = 0;
 
 for (const r of rows) {
   let types: string[] | null = null;
   if (r.wikidata_types) { try { types = JSON.parse(r.wikidata_types); } catch { types = null; } }
   const res = classify(types, r.blurb);
+  const matchedPopulatedPlaceSafetyNet =
+    (types?.some((type) => POPULATED_PLACE_SAFETY_NET_TYPES.has(type)) ?? false) ||
+    COUNTY_SEAT_SETTLEMENT.test((r.blurb ?? '').toLowerCase());
   via[res.via]++;
-  if (res.kind) { tally[res.kind]++; decided.push({ id: r.id, kind: res.kind }); }
-  else { tally.unclassified++; unclassified.push(r); }
+  if (res.kind) {
+    tally[res.kind]++;
+    decided.push({ id: r.id, kind: res.kind });
+    if (matchedPopulatedPlaceSafetyNet) populatedPlaceSafetyNet++;
+  } else {
+    tally.unclassified++;
+    unclassified.push(r);
+  }
 }
 
 if (!DRY) {
@@ -228,6 +248,7 @@ if (!DRY) {
 // ---------- report ----------
 console.log(`\nfounding rows examined: ${rows.length.toLocaleString()}${DRY ? '  (dry run, nothing written)' : ''}`);
 console.log(`  decided from P31 types: ${via.types.toLocaleString()}   from blurb: ${via.blurb.toLocaleString()}   undecided: ${via.none.toLocaleString()}`);
+console.log(`  populated-place safety net classified: ${populatedPlaceSafetyNet.toLocaleString()} (Q1093829 or 'county seat of').`);
 console.table(
   Object.entries(tally).map(([kind, count]) => ({
     kind,
