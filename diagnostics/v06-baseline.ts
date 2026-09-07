@@ -229,7 +229,8 @@ if (want('G')) {
   // Wikidata ids for the events every timeline in the window should be able to show.
   const ANCHORS: Record<string, string> = {
     Q2487: "Thirty Years' War",
-    Q179250: "Seven Years' War",
+    Q33143: "Seven Years' War",
+    Q160077: 'Fall of Constantinople',
     Q6534: 'French Revolution',
     Q78994: 'Napoleonic Wars',
     Q8676: 'American Civil War',
