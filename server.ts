@@ -417,6 +417,13 @@ function datasetMeta(): Record<string, unknown> {
  * has already been wrong once: prune-seed-dupes.ts wrote no stamp at all, so a
  * database that had been through three prunes reported 'prune2'. Any new prune
  * script must both write a meta key and be added here, or it stays invisible.
+ *
+ * v0.6 added two more prune-family passes that also mutate what a client gets
+ * back -- prune-media.ts (media/franchise defect removal) and
+ * merge-universal-dupes.ts (universal/global duplicate merge) -- and both were
+ * missing from this list the same way prune-seed-dupes.ts once was. Counted
+ * here now so a v0.6 build reports its true prune depth instead of silently
+ * undercounting it.
  */
 function datasetBuild(m: Record<string, unknown>): {
   id: string;
@@ -429,9 +436,13 @@ function datasetBuild(m: Record<string, unknown>): {
     reach: str('reach_version'),
     // Full stamps, e.g. 'election<0.25 removed 1047 at <ISO>'. Order is fixed so
     // the id is stable for a given file.
-    prunes: [str('last_prune'), str('last_series_prune'), str('last_dupe_prune')].filter(
-      (v): v is string => v !== null,
-    ),
+    prunes: [
+      str('last_prune'),
+      str('last_series_prune'),
+      str('last_dupe_prune'),
+      str('last_media_prune'),
+      str('last_universal_merge'),
+    ].filter((v): v is string => v !== null),
   };
   const id = [
     layers.ingest ?? 'unknown-ingest',
