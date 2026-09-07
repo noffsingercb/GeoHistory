@@ -1,0 +1,59 @@
+name: Apply founding scope fix
+
+on:
+  push:
+    branches: [v0.6]
+    paths: [.github/workflows/apply-founding-scope-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.6
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Apply targeted source edits
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:80]!r}')
+              p.write_text(text.replace(old, new))
+
+          replace('score.ts', "const SCORING_VERSION = 'struct-v0.7.1';", "const SCORING_VERSION = 'struct-v0.7.2';")
+          replace('score.ts', "//   - v0.7.1: curated seed rows keep their authored scope EXCEPT settlement\n//     foundings (founding_kind = 'settlement'). Circa's public launch showed\n//     users consistently rank curated settlement-founding rows (New Amsterdam,\n//     Tenochtitlan, Zanzibar, etc.) low no matter how the seed file scoped them,\n//     so those are forced to 'local' like their dump-derived counterparts.", "//   - v0.7.2: curated seed rows keep their authored scope EXCEPT settlement\n//     foundings (founding_kind = 'settlement' or 'city'). Circa's public launch\n//     showed users consistently rank these rows low no matter how the seed file\n//     scoped them, so all settlement foundings are forced to 'local'.")
+          replace('score.ts', "// FOUNDING is a special case. Before v0.6 the ingest discarded P31, so a\n// settlement's incorporation and a territory's statehood were indistinguishable\n// here, and the notability ladder below sent both to 'national' (a 1,950 km reach)\n// whenever the place is well known today. But sitelink count measures a place's\n// PRESENT-DAY prominence, not how far the news of its founding actually travelled\n// at the time. rescope-foundings.ts recovers the distinction (from wikidata_types\n// on v0.6 rows, from events.blurb on older ones) into founding_kind; when it is\n// set, it overrides the ladder.", "// FOUNDING is a special case. All settlement foundings, including cities, are\n// local events: present-day prominence does not determine how far news of a\n// settlement's founding travelled. rescope-foundings.ts recovers the distinction\n// between settlements, subnational statehood, countries, and institutions into\n// founding_kind; when set, it overrides the notability ladder.")
+          replace('score.ts', "  city: () => 'regional',                                        // a CITY (Q515 / big city) forming is regional news: Chicago 1837 mattered to Illinois, not to Georgia", "  city: () => 'local',                                           // all settlement foundings, including cities, are local")
+          replace('score.ts', '  let settlementOverride = 0;', '  let settlementFoundingOverride = 0;')
+          replace('score.ts', "      } else if (isSeed && !isExpanded && r.category === 'founding' && r.founding_kind === 'settlement') {\n        // v0.7.1: field feedback override. Unlike other seed rows, curated settlement\n        // foundings do NOT keep their authored scope -- they are forced to 'local',\n        // same as a dump-derived settlement founding would be.", "      } else if (\n        isSeed &&\n        !isExpanded &&\n        r.category === 'founding' &&\n        (r.founding_kind === 'settlement' || r.founding_kind === 'city')\n      ) {\n        // v0.7.2: all curated settlement foundings, including city-typed rows,\n        // are forced local like their dump-derived counterparts.")
+          replace('score.ts', '        settlementOverride++;', '        settlementFoundingOverride++;')
+          replace('score.ts', "  console.log(`  curated settlement foundings forced to local (v0.7.1 field-feedback override): ${settlementOverride.toLocaleString()}.`);", "  console.log(`  curated settlement/city foundings forced to local (v0.7.2 field-feedback override): ${settlementFoundingOverride.toLocaleString()}.`);")
+
+          replace('rescope-foundings.ts', "//   Q515 city / Q1549591 big city           -> city         -> regional (score.ts)", "//   Q515 city / Q1549591 big city           -> city         -> local (score.ts)")
+          replace('rescope-foundings.ts', "// P31 -> kind. Mirrors the founding roots in ingest-dump.ts. Only DIRECT types are\n// matched here (the closure lives in the ingest); Wikidata's settlement items carry\n// the concrete class directly in P31 in the vast majority of cases.\nconst TYPE_KIND", "// P31 -> kind. Mirrors the founding roots in ingest-dump.ts. Only DIRECT types are\n// matched here (the closure lives in the ingest). Q1093829 is the concrete class\n// used by United States city rows, including Q1810731.\n//\n// This structural safety net is preferred over report-only triage: the class and\n// the phrase 'county seat of' unambiguously describe populated places.\nconst POPULATED_PLACE_SAFETY_NET_TYPES = new Set(['Q1093829']);\n\nconst TYPE_KIND")
+          replace('rescope-foundings.ts', "  Q5119: 'city',         // capital\n  Q3957", "  Q5119: 'city',         // capital\n  Q1093829: 'city',      // city of the United States\n  Q3957")
+          replace('rescope-foundings.ts', "// An explicit settlement noun is decisive even when the description also names the\n// containing state or country (\"city in the state of Nevada\", \"capital city of Peru\").\nconst SETTLEMENT", "const COUNTY_SEAT_SETTLEMENT = /\\bcounty seat of\\b/;\n\n// An explicit settlement noun is decisive even when the description also names the\n// containing state or country. 'County seat of' describes the populated place\n// serving as the seat, not the founding of the county itself.\nconst SETTLEMENT")
+          replace('rescope-foundings.ts', "  /\\bport (city|town)\\b/,\n];", "  /\\bport (city|town)\\b/,\n  COUNTY_SEAT_SETTLEMENT,\n];")
+          replace('rescope-foundings.ts', "  city: 'regional (210-300 km), rank weight 0.35 until core.ts adds a city weight',", "  city: 'local (50-60 km), rank weight 0.35 until core.ts adds a city weight',")
+          replace('rescope-foundings.ts', "const unclassified: Row[] = [];\n\nfor (const r of rows) {\n  let types: string[] | null = null;\n  if (r.wikidata_types) { try { types = JSON.parse(r.wikidata_types); } catch { types = null; } }\n  const res = classify(types, r.blurb);\n  via[res.via]++;\n  if (res.kind) { tally[res.kind]++; decided.push({ id: r.id, kind: res.kind }); }\n  else { tally.unclassified++; unclassified.push(r); }\n}", "const unclassified: Row[] = [];\nlet populatedPlaceSafetyNet = 0;\n\nfor (const r of rows) {\n  let types: string[] | null = null;\n  if (r.wikidata_types) { try { types = JSON.parse(r.wikidata_types); } catch { types = null; } }\n  const res = classify(types, r.blurb);\n  const matchedPopulatedPlaceSafetyNet =\n    (types?.some((type) => POPULATED_PLACE_SAFETY_NET_TYPES.has(type)) ?? false) ||\n    COUNTY_SEAT_SETTLEMENT.test((r.blurb ?? '').toLowerCase());\n  via[res.via]++;\n  if (res.kind) {\n    tally[res.kind]++;\n    decided.push({ id: r.id, kind: res.kind });\n    if (matchedPopulatedPlaceSafetyNet) populatedPlaceSafetyNet++;\n  } else {\n    tally.unclassified++;\n    unclassified.push(r);\n  }\n}")
+          replace('rescope-foundings.ts', "console.log(`  decided from P31 types: ${via.types.toLocaleString()}   from blurb: ${via.blurb.toLocaleString()}   undecided: ${via.none.toLocaleString()}`);", "console.log(`  decided from P31 types: ${via.types.toLocaleString()}   from blurb: ${via.blurb.toLocaleString()}   undecided: ${via.none.toLocaleString()}`);\nconsole.log(`  populated-place safety net classified: ${populatedPlaceSafetyNet.toLocaleString()} (Q1093829 or 'county seat of').`);")
+      - name: Commit source changes and remove one-shot workflow
+        run: |
+          rm .github/workflows/apply-founding-scope-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add score.ts rescope-foundings.ts .github/workflows/apply-founding-scope-fix.yml
+          git commit -m "fix: scope all settlement foundings locally"
+          git push origin v0.6
