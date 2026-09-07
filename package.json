@@ -19,7 +19,7 @@
     "prune:series": "tsx prune-series.ts",
     "prune:media": "tsx prune-media.ts",
     "prune:dupes": "tsx prune-seed-dupes.ts",
-    "post-ingest": "npm run seed && npm run prune:dupes && npm run prune:series -- --apply && npm run rescope:foundings && npm run score && npm run expand:participants && npm run score && npm run titles",
+    "post-ingest": "npm run seed && npm run ingest:dump && npm run rescope:foundings && npm run prune:media -- --apply && npm run prune:series -- --apply && npx tsx merge-universal-dupes.ts --apply && npm run prune:dupes && npm run score && npm run expand:participants && npm run score && npm run titles",
     "diag": "tsx diagnostics/v06-baseline.ts",
     "diagnose": "tsx diagnose-defects.ts",
     "timeline": "tsx timeline.ts",
