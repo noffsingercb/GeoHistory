@@ -2175,21 +2175,6 @@
     "Seed ID": "carnatic-1756-01-01"
   },
   {
-    "Title": "Europe",
-    "Blurb": "The Seven Years' War is fought among European powers in various theaters around the world, from 1756 to 1763.",
-    "Date start": "1756-01-01",
-    "Precision": "year",
-    "Category": "conflict",
-    "Place": "Europe",
-    "Lat": 50,
-    "Lng": 15,
-    "Notability": 0.9,
-    "Scope (intended)": "global",
-    "Source URL": "https://en.wikipedia.org/wiki/18th_century",
-    "Ingest version": "seed-timeline-wikipedia-v0.1",
-    "Seed ID": "europe-1756-01-01"
-  },
-  {
     "Title": "Bengal",
     "Blurb": "British conquest of Bengal.",
     "Date start": "1757-01-01",

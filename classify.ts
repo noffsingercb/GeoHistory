@@ -1,11 +1,10 @@
 // ===================== Shared blurb classifiers =====================
-// `ingest-dump.ts` picks a category from an item's P31 types and then discards
-// them, so the events table cannot distinguish a university from a war. The one
-// place the distinction survives is the Wikidata English description stored in
-// events.blurb, which both score.ts and rescope-foundings.ts already mine.
+// Older ingest versions picked a category from an item's P31 types and then
+// discarded them. Schema v0.6 retains the first 12 P31 QIDs in wikidata_types,
+// while events.blurb remains the fallback signal for older rows.
 //
-// This module exists so those two files share one pattern set instead of drifting
-// apart. It is pure -- no DB, no side effects -- so either script can import it.
+// This module exists so classifiers are shared instead of drifting apart. It is
+// pure -- no DB, no side effects -- so any script can import it.
 
 /**
  * Wikidata descriptions are noun phrases that lead with the subject's class:
@@ -82,4 +81,84 @@ export function isInstitution(blurb: string | null | undefined): boolean {
   if (INCIDENT.some((re) => re.test(b))) return false;
   const head = headPhrase(blurb);
   return INSTITUTION.some((re) => re.test(head));
+}
+
+// Creative-work P31 classes used by the media pruner:
+// Q11424 film; Q5398426 television series; Q581714 animated series;
+// Q63952888 animated television series; Q117467246 animated television series /
+// animated TV-work subtype observed in dump-v0.6; Q7889 video game; Q196600 media
+// franchise; Q178296 comic strip; Q21191134 comic-strip type observed on Garfield
+// in dump-v0.6; Q838795 comic-strip type observed on Peanuts in dump-v0.6;
+// Q213369 webcomic; Q8261 novel; Q482994 album; Q7366 song; Q24634210 podcast.
+const MEDIA_TYPES = new Set([
+  'Q11424',
+  'Q5398426',
+  'Q581714',
+  'Q63952888',
+  'Q117467246',
+  'Q7889',
+  'Q196600',
+  'Q178296',
+  'Q21191134',
+  'Q838795',
+  'Q213369',
+  'Q8261',
+  'Q482994',
+  'Q7366',
+  'Q24634210',
+]);
+
+const MEDIA_CREATOR = /\b(actor|director|screenwriter)\b/;
+const MEDIA_HEAD: RegExp[] = [
+  /\bfilm(?: series)?(?:\s*\([^)]*\))?$/,
+  /\b(?:television|tv) (?:series|sitcom|miniseries|program|programme|show)(?:\s*\([^)]*\))?$/,
+  /\banimated (?:television )?series(?:\s*\([^)]*\))?$/,
+  /\bvideo game(?: series)?(?:\s*\([^)]*\))?$/,
+  /\b(?:media|multimedia) franchise\b/,
+  /\bfranchise(?:\s*\([^)]*\))?$/,
+  /\b(?:comic strip|webcomic)(?:\s*\([^)]*\))?$/,
+  /\bnovel(?: series)?(?:\s*\([^)]*\))?$/,
+  /\balbum(?:\s*\([^)]*\))?$/,
+  /\bsong(?:\s*\([^)]*\))?$/,
+  /\bpodcast(?: series)?(?:\s*\([^)]*\))?$/,
+];
+
+export type WikidataTypes = string | readonly string[] | null | undefined;
+
+/** Returns normalized P31 values when supplied, otherwise null. */
+function normalizeWikidataTypes(wikidataTypes: WikidataTypes): string[] | null {
+  if (Array.isArray(wikidataTypes)) {
+    const values = wikidataTypes.filter((value): value is string => typeof value === 'string' && value.length > 0);
+    return values.length > 0 ? values : null;
+  }
+  if (typeof wikidataTypes !== 'string') return null;
+  const raw = wikidataTypes.trim();
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const values = parsed.filter((value): value is string => typeof value === 'string' && value.length > 0);
+      return values.length > 0 ? values : null;
+    }
+  } catch {
+    // A direct QID is still useful type evidence. Other malformed values fall
+    // through to the conservative head-phrase fallback below.
+  }
+  return [raw];
+}
+
+/**
+ * True when P31 identifies a creative work, or when the description's head phrase
+ * strongly identifies one. Unknown P31 types do not suppress the head-phrase
+ * fallback: dump-v0.6 contains media-specific P31 subclasses not in this list.
+ * The fallback rejects creator-person phrases so "American film director" cannot
+ * classify the person as the film.
+ */
+export function isMedia(blurb: string | null | undefined, wikidataTypes: WikidataTypes): boolean {
+  const types = normalizeWikidataTypes(wikidataTypes);
+  if (types?.some((qid) => MEDIA_TYPES.has(qid))) return true;
+  if (!blurb) return false;
+  const head = headPhrase(blurb);
+  if (MEDIA_CREATOR.test(head)) return false;
+  return MEDIA_HEAD.some((re) => re.test(head));
 }
