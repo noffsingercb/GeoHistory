@@ -20,6 +20,7 @@
     "prune:dupes": "tsx prune-seed-dupes.ts",
     "post-ingest": "npm run seed && npm run prune:dupes && npm run prune:series -- --apply && npm run rescope:foundings && npm run score && npm run expand:participants && npm run score && npm run titles",
     "diag": "tsx diagnostics/v06-baseline.ts",
+    "diagnose": "tsx diagnose-defects.ts",
     "timeline": "tsx timeline.ts",
     "search": "tsx search.ts",
     "stats": "tsx stats.ts",
