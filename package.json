@@ -17,6 +17,7 @@
     "titles": "tsx display-titles.ts",
     "prune": "tsx prune.ts",
     "prune:series": "tsx prune-series.ts",
+    "prune:media": "tsx prune-media.ts",
     "prune:dupes": "tsx prune-seed-dupes.ts",
     "post-ingest": "npm run seed && npm run prune:dupes && npm run prune:series -- --apply && npm run rescope:foundings && npm run score && npm run expand:participants && npm run score && npm run titles",
     "diag": "tsx diagnostics/v06-baseline.ts",
