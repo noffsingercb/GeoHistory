@@ -175,4 +175,12 @@ export function validateConfig(raw: unknown): Partial<EngineConfig> | undefined 
   }
 
   const out: Record<string, unknown> = {};
-  for (const [key
+  for (const [key, value] of Object.entries(input)) {
+    // An explicit undefined is the same as absent -- JSON cannot produce one,
+    // but a hand-built object can.
+    if (value === undefined) continue;
+    out[key] = VALIDATORS[key](value);
+  }
+
+  return out as Partial<EngineConfig>;
+}
