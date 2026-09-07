@@ -88,8 +88,8 @@ export function isInstitution(blurb: string | null | undefined): boolean {
 // Q63952888 animated television series; Q117467246 animated television series /
 // animated TV-work subtype observed in dump-v0.6; Q7889 video game; Q196600 media
 // franchise; Q178296 comic strip; Q21191134 comic-strip type observed on Garfield
-// in dump-v0.6; Q213369 webcomic; Q8261 novel; Q482994 album; Q7366 song;
-// Q24634210 podcast.
+// in dump-v0.6; Q838795 comic-strip type observed on Peanuts in dump-v0.6;
+// Q213369 webcomic; Q8261 novel; Q482994 album; Q7366 song; Q24634210 podcast.
 const MEDIA_TYPES = new Set([
   'Q11424',
   'Q5398426',
@@ -100,6 +100,7 @@ const MEDIA_TYPES = new Set([
   'Q196600',
   'Q178296',
   'Q21191134',
+  'Q838795',
   'Q213369',
   'Q8261',
   'Q482994',
