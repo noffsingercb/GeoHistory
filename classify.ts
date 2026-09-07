@@ -85,17 +85,21 @@ export function isInstitution(blurb: string | null | undefined): boolean {
 
 // Creative-work P31 classes used by the media pruner:
 // Q11424 film; Q5398426 television series; Q581714 animated series;
-// Q63952888 animated television series; Q7889 video game; Q196600 media
-// franchise; Q178296 comic strip; Q213369 webcomic; Q8261 novel;
-// Q482994 album; Q7366 song; Q24634210 podcast.
+// Q63952888 animated television series; Q117467246 animated television series /
+// animated TV-work subtype observed in dump-v0.6; Q7889 video game; Q196600 media
+// franchise; Q178296 comic strip; Q21191134 comic-strip type observed on Garfield
+// in dump-v0.6; Q213369 webcomic; Q8261 novel; Q482994 album; Q7366 song;
+// Q24634210 podcast.
 const MEDIA_TYPES = new Set([
   'Q11424',
   'Q5398426',
   'Q581714',
   'Q63952888',
+  'Q117467246',
   'Q7889',
   'Q196600',
   'Q178296',
+  'Q21191134',
   'Q213369',
   'Q8261',
   'Q482994',
@@ -120,12 +124,7 @@ const MEDIA_HEAD: RegExp[] = [
 
 export type WikidataTypes = string | readonly string[] | null | undefined;
 
-/**
- * Returns a non-empty P31 list when one was supplied. A JSON `[]`, blank string,
- * null, or undefined means the caller has no type evidence and may use the blurb
- * fallback. A malformed non-empty value remains "present" and therefore does not
- * silently opt into the less reliable prose classifier.
- */
+/** Returns normalized P31 values when supplied, otherwise null. */
 function normalizeWikidataTypes(wikidataTypes: WikidataTypes): string[] | null {
   if (Array.isArray(wikidataTypes)) {
     const values = wikidataTypes.filter((value): value is string => typeof value === 'string' && value.length > 0);
@@ -141,20 +140,22 @@ function normalizeWikidataTypes(wikidataTypes: WikidataTypes): string[] | null {
       return values.length > 0 ? values : null;
     }
   } catch {
-    // A direct QID is still type evidence. Any other malformed non-empty value
-    // is treated as unknown present type data rather than as missing data.
+    // A direct QID is still useful type evidence. Other malformed values fall
+    // through to the conservative head-phrase fallback below.
   }
   return [raw];
 }
 
 /**
- * True when P31 identifies a creative work, or -- only when P31 is missing -- the
- * description's head phrase identifies one. The fallback rejects creator-person
- * phrases so "American film director" cannot classify the person as the film.
+ * True when P31 identifies a creative work, or when the description's head phrase
+ * strongly identifies one. Unknown P31 types do not suppress the head-phrase
+ * fallback: dump-v0.6 contains media-specific P31 subclasses not in this list.
+ * The fallback rejects creator-person phrases so "American film director" cannot
+ * classify the person as the film.
  */
 export function isMedia(blurb: string | null | undefined, wikidataTypes: WikidataTypes): boolean {
   const types = normalizeWikidataTypes(wikidataTypes);
-  if (types) return types.some((qid) => MEDIA_TYPES.has(qid));
+  if (types?.some((qid) => MEDIA_TYPES.has(qid))) return true;
   if (!blurb) return false;
   const head = headPhrase(blurb);
   if (MEDIA_CREATOR.test(head)) return false;
