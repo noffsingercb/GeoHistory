@@ -50,7 +50,7 @@ RUN apt-get update \
 # new asset to the same release tag leaves the curl command byte-identical, so
 # without a bump here a cached layer would ship an old database forever. Set it
 # to whatever the new dump is stamped with, or pass --build-arg at build time.
-ARG DATASET_VERSION=dump-v0.5+struct-v0.6+reach-v0.2+prune3
+ARG DATASET_VERSION=dump-v0.6+struct-v0.7.2+reach-v0.3+universal-v0.1+participants-v0.1+prune5
 ARG DATASET_URL=https://github.com/noffsingercb/GeoHistory/releases/download/dataset-latest/events.sqlite
 
 # Expected SHA-256 of events.sqlite. Empty by default, which keeps every
