@@ -16,6 +16,11 @@ import { isInstitution } from './classify';
 //   - rows expanded from a war's participant list (expand-participants.ts,
 //     coord_source = 'P710') keep their authored 'national' scope: they exist so
 //     the US centroid carries World War II to an Ohio life.
+//   - v0.7.1: curated seed rows keep their authored scope EXCEPT settlement
+//     foundings (founding_kind = 'settlement'). Circa's public launch showed
+//     users consistently rank curated settlement-founding rows (New Amsterdam,
+//     Tenochtitlan, Zanzibar, etc.) low no matter how the seed file scoped them,
+//     so those are forced to 'local' like their dump-derived counterparts.
 //   - recency taper (ERA_TAPER): Wikipedia documents the recent past far more
 //     densely than any earlier era, and controversial modern events attract the
 //     most sitelinks of all, so raw notability sends a 2020 protest to 'global'
@@ -33,7 +38,7 @@ import { isInstitution } from './classify';
 //     'local' or 'regional': the point is fuzzy by hundreds of km.
 
 const MODE = (process.argv[2] ?? 'all').toLowerCase(); // 'all' | 'scores' | 'reach'
-const SCORING_VERSION = 'struct-v0.7';
+const SCORING_VERSION = 'struct-v0.7.1';
 const REACH_VERSION = 'reach-v0.3';
 const DB_PATH = process.env.GEOHISTORY_DB ?? 'events.sqlite';
 
@@ -254,6 +259,7 @@ function runScoring(): void {
   let demoted = 0;
   let universal = 0;
   let expanded = 0;
+  let settlementOverride = 0;
   let tapered = 0;      // history rows whose ladder rung dropped because of the era taper
   let liftedCentroid = 0;
   const globalByDecade = new Map<number, number>(); // taper QA: global rows per decade from 1900
@@ -274,6 +280,13 @@ function runScoring(): void {
         scope = 'universal';
         significance = 1;
         universal++;
+      } else if (isSeed && !isExpanded && r.category === 'founding' && r.founding_kind === 'settlement') {
+        // v0.7.1: field feedback override. Unlike other seed rows, curated settlement
+        // foundings do NOT keep their authored scope -- they are forced to 'local',
+        // same as a dump-derived settlement founding would be.
+        scope = 'local';
+        significance = Math.round(percentile(map, decadeOf(r.date_start), notability) * 1000) / 1000;
+        settlementOverride++;
       } else if ((isSeed || isExpanded) && r.scope) {
         // Curated seed rows carry an authored scope; participant-expanded rows carry
         // 'national' by construction. Preserve both rather than deriving from the formula.
@@ -310,6 +323,7 @@ function runScoring(): void {
   console.log(`  percentiled separately: ${(rows.length - persons).toLocaleString()} history rows, ${persons.toLocaleString()} person rows (birth/death).`);
   console.log(`  universal rows pinned (scope universal, significance 1.0): ${universal.toLocaleString()}.`);
   console.log(`  participant-expanded rows kept national (coord_source P710): ${expanded.toLocaleString()}.`);
+  console.log(`  curated settlement foundings forced to local (v0.7.1 field-feedback override): ${settlementOverride.toLocaleString()}.`);
   console.log(`  founding rows scoped by founding_kind: ${byKind.toLocaleString()} (run "npm run rescope:foundings" to classify more).`);
   console.log(`  institution rows capped at regional/local: ${institutions.toLocaleString()} (${demoted.toLocaleString()} were previously national or global).`);
   console.log(`  recency taper lowered the scope rung of ${tapered.toLocaleString()} post-1950 history rows; centroid-placed rows lifted to national: ${liftedCentroid.toLocaleString()}.`);
