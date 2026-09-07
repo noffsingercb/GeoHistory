@@ -1,26 +1,31 @@
 import Database from 'better-sqlite3';
 import { isInstitution } from './classify';
 
-// ===================== Founding sub-type classifier (stopgap) =====================
-// `ingest-dump.ts` uses an item's P31 types to pick a category and then discards
-// them. So "Las Vegas was incorporated" and "Arizona became a state" arrive in the
-// events table as indistinguishable `founding` rows, and score.ts's notability
-// ladder gave BOTH a national scope -> a 1,950 km reach. That is why a Pueblo
-// timeline ranked the founding of Las Vegas, 961 km away, as national context.
+// ===================== Founding sub-type classifier =====================
+// Before v0.6, `ingest-dump.ts` used an item's P31 types to pick a category and
+// then discarded them. So "Las Vegas was incorporated" and "Arizona became a state"
+// arrived in the events table as indistinguishable `founding` rows, and score.ts's
+// notability ladder gave BOTH a national scope -> a 1,950 km reach. That is why a
+// Pueblo timeline ranked the founding of Las Vegas, 961 km away, as national context.
 //
-// The proper fix is a v2 ingest that retains P31. Until then we recover the
-// distinction from the one place it survives in the current file: the Wikidata
-// English description already stored in events.blurb --
-//   "city in Nevada, United States"        -> settlement   -> local
-//   "state of the United States"           -> subnational  -> national (see score.ts)
-//   "sovereign state in South America"     -> country      -> national / global
-//   "university in Toronto, Ontario"       -> institution  -> regional / local
+// dump-v0.6 keeps the P31 list on every row (events.wikidata_types), so the kind
+// is now read from STRUCTURE first and from the blurb only as a fallback:
+//   Q515 city / Q1549591 big city           -> city         -> regional (score.ts)
+//   Q3957 town / Q532 village               -> settlement   -> local
+//   Q10864048 first-level admin division    -> subnational  -> national
+//   Q6256 / Q3624078 / Q3024240 country     -> country      -> national / global
+//   blurb says university / hospital / ...  -> institution  -> regional / local
+// Rows from a v0.5 file (wikidata_types NULL) still go through the blurb rules:
+//   "city in Nevada, United States"        -> settlement (v0.5 could not tell a city from a town)
+//   "state of the United States"           -> subnational
+//   "sovereign state in South America"     -> country
+//   "university in Toronto, Ontario"       -> institution
 //
-// founding_kind now drives RANK as well as scope: core.ts resolves its per-row
+// founding_kind drives RANK as well as scope: core.ts resolves its per-row
 // weight through DEFAULT_CONFIG.foundingKindWeights (settlement 0.35, institution
-// 0.5, subnational 0.9, country 0.9) before falling back to categoryWeights.
-// A row left unclassified therefore keeps both the old notability-ladder scope and
-// the old flat 0.7 weight -- classification is now worth more than it used to be.
+// 0.5, subnational 0.9, country 0.9; city falls back to settlement's weight until
+// core.ts learns the kind) before falling back to categoryWeights. A row left
+// unclassified keeps both the old notability-ladder scope and the flat 0.7 weight.
 //
 // NOTE: institution rows are ALSO handled directly in score.ts, because the ingest
 // files institutions inconsistently -- York University and DeVry University both
@@ -46,15 +51,40 @@ const LIMIT = (() => {
   const n = a ? parseInt(a.split('=')[1], 10) : 0;
   return Number.isFinite(n) && n > 0 ? n : 0;
 })();
+const DB_PATH = process.env.GEOHISTORY_DB ?? 'events.sqlite';
 
-const db = new Database('events.sqlite');
+const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
 // Idempotent migration so this runs against an existing DB with no rebuild.
 try { db.exec('ALTER TABLE events ADD COLUMN founding_kind TEXT;'); } catch { /* column already exists */ }
 db.exec('CREATE INDEX IF NOT EXISTS idx_events_founding_kind ON events(founding_kind);');
+const hasTypes = (db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>).some((c) => c.name === 'wikidata_types');
 
-type FoundingKind = 'settlement' | 'subnational' | 'country' | 'institution';
+type FoundingKind = 'settlement' | 'city' | 'subnational' | 'country' | 'institution';
+
+// P31 -> kind. Mirrors the founding roots in ingest-dump.ts. Only DIRECT types are
+// matched here (the closure lives in the ingest); Wikidata's settlement items carry
+// the concrete class directly in P31 in the vast majority of cases.
+const TYPE_KIND: Record<string, FoundingKind> = {
+  Q515: 'city',          // city
+  Q1549591: 'city',      // big city
+  Q1637706: 'city',      // city with millions of inhabitants
+  Q174844: 'city',       // megacity
+  Q5119: 'city',         // capital
+  Q3957: 'settlement',   // town
+  Q532: 'settlement',    // village
+  Q486972: 'settlement', // human settlement
+  Q3327873: 'settlement',// unincorporated community
+  Q498162: 'settlement', // census-designated place
+  Q10864048: 'subnational', // first-level administrative division
+  Q35657: 'subnational',    // US state
+  Q1352230: 'subnational',  // US territory
+  Q6256: 'country',      // country
+  Q3624078: 'country',   // sovereign state
+  Q3024240: 'country',   // historical country
+  Q1763527: 'country',   // constituent country
+};
 
 // An explicit settlement noun is decisive even when the description also names the
 // containing state or country ("city in the state of Nevada", "capital city of Peru").
@@ -103,7 +133,7 @@ const COUNTRY: RegExp[] = [
 ];
 
 /**
- * Order is load-bearing:
+ * Blurb rules. Order is load-bearing:
  *   1. institutions win outright -- "university in the city of Toronto" is a
  *      university, not a settlement, and the settlement rule would otherwise
  *      claim it on the word "city",
@@ -113,7 +143,7 @@ const COUNTRY: RegExp[] = [
  *   5. remaining country wording.
  * Anything unmatched returns null and keeps the old notability-ladder behavior.
  */
-function classify(blurb: string | null): FoundingKind | null {
+function classifyBlurb(blurb: string | null): FoundingKind | null {
   if (!blurb) return null;
   const b = blurb.toLowerCase();
   if (isInstitution(blurb)) return 'institution';
@@ -124,10 +154,32 @@ function classify(blurb: string | null): FoundingKind | null {
   return null;
 }
 
+/**
+ * Structure first. Institutions still win (a "university town" item typed Q3957 is
+ * a town; but a row whose blurb says "university" and whose P31 is Q515 is a data
+ * error we resolve in favour of the blurb, as before). Among the place types the
+ * MOST SPECIFIC wins: an item typed both 'city' and 'first-level admin division'
+ * (Berlin, Mexico City) is a city for the purposes of "how far did its founding
+ * travel", and the founding of a city-state typed country + city stays a country.
+ */
+function classify(types: string[] | null, blurb: string | null): { kind: FoundingKind | null; via: 'types' | 'blurb' | 'none' } {
+  if (isInstitution(blurb)) return { kind: 'institution', via: 'blurb' };
+  if (types && types.length) {
+    const kinds = new Set(types.map((t) => TYPE_KIND[t]).filter(Boolean) as FoundingKind[]);
+    if (kinds.has('country')) return { kind: 'country', via: 'types' };
+    if (kinds.has('city')) return { kind: 'city', via: 'types' };
+    if (kinds.has('settlement')) return { kind: 'settlement', via: 'types' };
+    if (kinds.has('subnational')) return { kind: 'subnational', via: 'types' };
+  }
+  const kind = classifyBlurb(blurb);
+  return { kind, via: kind ? 'blurb' : 'none' };
+}
+
 // Mirrors FOUNDING_KIND_SCOPE in score.ts and foundingKindWeights in core.ts --
 // reporting only, kept in sync by hand.
 const SCOPE_LABEL: Record<string, string> = {
   settlement: 'local (50-60 km), rank weight 0.35',
+  city: 'regional (210-300 km), rank weight 0.35 until core.ts adds a city weight',
   institution: 'regional (210-300 km) or local, rank weight 0.5',
   subnational: 'national (1,050-1,950 km), rank weight 0.9',
   country: 'national / global (by notability), rank weight 0.9',
@@ -141,23 +193,27 @@ if (RESET && !DRY) {
   console.log(`--reset: cleared founding_kind on ${cleared.changes.toLocaleString()} rows.`);
 }
 
-interface Row { id: string; title: string; blurb: string | null; notability: number | null; }
+interface Row { id: string; title: string; blurb: string | null; notability: number | null; wikidata_types: string | null; }
 
 const rows = db.prepare(`
-  SELECT id, title, blurb, notability
+  SELECT id, title, blurb, notability, ${hasTypes ? 'wikidata_types' : 'NULL AS wikidata_types'}
   FROM events
   WHERE category = 'founding'
   ORDER BY notability DESC
   ${LIMIT ? 'LIMIT ' + LIMIT : ''}
 `).all() as Row[];
 
-const tally: Record<string, number> = { settlement: 0, institution: 0, subnational: 0, country: 0, unclassified: 0 };
+const tally: Record<string, number> = { settlement: 0, city: 0, institution: 0, subnational: 0, country: 0, unclassified: 0 };
+const via: Record<string, number> = { types: 0, blurb: 0, none: 0 };
 const decided: Array<{ id: string; kind: FoundingKind }> = [];
 const unclassified: Row[] = [];
 
 for (const r of rows) {
-  const kind = classify(r.blurb);
-  if (kind) { tally[kind]++; decided.push({ id: r.id, kind }); }
+  let types: string[] | null = null;
+  if (r.wikidata_types) { try { types = JSON.parse(r.wikidata_types); } catch { types = null; } }
+  const res = classify(types, r.blurb);
+  via[res.via]++;
+  if (res.kind) { tally[res.kind]++; decided.push({ id: r.id, kind: res.kind }); }
   else { tally.unclassified++; unclassified.push(r); }
 }
 
@@ -171,6 +227,7 @@ if (!DRY) {
 
 // ---------- report ----------
 console.log(`\nfounding rows examined: ${rows.length.toLocaleString()}${DRY ? '  (dry run, nothing written)' : ''}`);
+console.log(`  decided from P31 types: ${via.types.toLocaleString()}   from blurb: ${via.blurb.toLocaleString()}   undecided: ${via.none.toLocaleString()}`);
 console.table(
   Object.entries(tally).map(([kind, count]) => ({
     kind,
@@ -183,11 +240,12 @@ console.table(
 // The unclassified rows that matter are the famous ones -- those are the entries
 // that will keep surfacing in timelines with an inflated reach.
 if (unclassified.length) {
-  console.log(`\nTop unclassified by notability (extend the patterns if these look systematic):`);
+  console.log(`\nTop unclassified by notability (extend TYPE_KIND or the patterns if these look systematic):`);
   console.table(unclassified.slice(0, 20).map((r) => ({
     notability: r.notability,
     title: r.title.slice(0, 40),
-    blurb: (r.blurb ?? '(none)').slice(0, 70),
+    types: (r.wikidata_types ?? '').slice(0, 40),
+    blurb: (r.blurb ?? '(none)').slice(0, 60),
   })));
 }
 

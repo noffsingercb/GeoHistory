@@ -27,6 +27,8 @@ import Database from 'better-sqlite3';
 // After applying, re-run `npm run score` so era-normalized significance is
 // recomputed without the pruned rows. NOTE: that pass also restamps
 // meta.dataset_version to the modal ingest_version.
+//
+// Never deleted: seed rows, universal rows, participant-expanded rows (P710).
 
 const SERIES_GLOB = '[12][0-9][0-9][0-9] *';
 
@@ -52,9 +54,14 @@ const minEditions = Math.max(2, parseInt(flagValue('min') ?? '5', 10) || 5);
 const apply = hasFlag('apply');
 const extraKeep = (flagValue('keep') ?? '').split('|').map((s) => s.trim()).filter(Boolean);
 const keepSet = new Set([...DEFAULT_KEEP, ...extraKeep].map((s) => s.toLowerCase()));
+const DB_PATH = process.env.GEOHISTORY_DB ?? 'events.sqlite';
 
-const db = new Database('events.sqlite');
+const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+
+// Rows this script may never remove. Counted as `protected` per series below.
+const hasCoordSource = (db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>).some((c) => c.name === 'coord_source');
+const PROTECTED = `(ingest_version LIKE 'seed-%' OR scope IS 'universal'${hasCoordSource ? " OR COALESCE(coord_source, '') = 'P710'" : ''})`;
 
 interface SeriesRow {
   series: string;
@@ -75,7 +82,7 @@ const series = db.prepare(`
          ROUND(AVG(notability), 3)                               AS avg_notability,
          ROUND(AVG(significance), 3)                             AS avg_sig,
          MIN(category)                                           AS category,
-         SUM(CASE WHEN ingest_version LIKE 'seed-%' THEN 1 ELSE 0 END) AS seeded
+         SUM(CASE WHEN ${PROTECTED} THEN 1 ELSE 0 END)           AS seeded
   FROM events
   WHERE title GLOB @glob
   GROUP BY series
@@ -92,8 +99,8 @@ if (series.length === 0) {
 const totalRows = (db.prepare(`SELECT COUNT(*) AS c FROM events`).get() as any).c as number;
 const isKept = (s: SeriesRow) => keepSet.has(s.series.toLowerCase());
 
-// Seed rows are hand-curated and are never deleted, so a fully-seeded series is
-// effectively kept no matter what the verdict column says.
+// Protected rows (seed / universal / participant-expanded) are never deleted, so
+// a fully-protected series is effectively kept no matter what the verdict says.
 const doomedRowCount = series
   .filter((s) => !isKept(s))
   .reduce((acc, s) => acc + (s.n - s.seeded), 0);
@@ -103,7 +110,7 @@ console.log('  VERDICT  EDITIONS  YEARS       AVG_SIG  CATEGORY    SERIES');
 for (const s of series) {
   const verdict = isKept(s) ? 'KEEP  ' : 'DELETE';
   const years = `${s.first_yr}-${s.last_yr}`.padEnd(11);
-  const seedNote = s.seeded > 0 ? `  (${s.seeded} seeded, protected)` : '';
+  const seedNote = s.seeded > 0 ? `  (${s.seeded} protected: seed / universal / expanded)` : '';
   console.log(
     `  ${verdict}   ${String(s.n).padStart(6)}    ${years} ${String(s.avg_sig ?? 0).padStart(7)}  ` +
     `${(s.category ?? '-').padEnd(10)}  ${s.series}${seedNote}`,
@@ -118,7 +125,7 @@ const sample = db.prepare(`
   SELECT title, substr(date_start, 1, 4) AS yr, significance
   FROM events
   WHERE title GLOB @glob
-    AND ingest_version NOT LIKE 'seed-%'
+    AND NOT ${PROTECTED}
     AND substr(title, 6) IN (SELECT substr(title, 6) FROM events WHERE title GLOB @glob GROUP BY substr(title, 6) HAVING COUNT(*) >= @min)
   ORDER BY significance DESC
   LIMIT 15
@@ -142,7 +149,7 @@ const del = db.prepare(`
   DELETE FROM events
   WHERE title GLOB @glob
     AND substr(title, 6) = @series
-    AND ingest_version NOT LIKE 'seed-%'
+    AND NOT ${PROTECTED}
 `);
 
 let deleted = 0;
