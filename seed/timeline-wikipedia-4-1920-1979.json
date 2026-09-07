@@ -9780,21 +9780,6 @@
     "Seed ID": "second-vatican-council-1962-10-11"
   },
   {
-    "Title": "Cuba",
-    "Blurb": "Cuban Missile Crisis, 13-day confrontation between the governments of the United States and the Soviet Union, when American deployments of nuclear missiles in Italy and Turkey were matched by Soviet deployments of nuclear missiles in Cuba.",
-    "Date start": "1962-10-16",
-    "Precision": "day",
-    "Category": "event",
-    "Place": "Havana, Cuba",
-    "Lat": 23.11,
-    "Lng": -82.37,
-    "Notability": 1,
-    "Scope (intended)": "global",
-    "Source URL": "https://en.wikipedia.org/wiki/20th_century",
-    "Ingest version": "seed-timeline-wikipedia-v0.1",
-    "Seed ID": "cuba-1962-10-16"
-  },
-  {
     "Title": "Eritrea",
     "Blurb": "Eritrea becomes a province of the Ethiopian Empire, losing the autonomy it had under federation.",
     "Date start": "1962-11-14",
@@ -10738,21 +10723,6 @@
     "Source URL": "https://en.wikipedia.org/wiki/Timeline_of_geopolitical_changes_(1900%E2%80%931999)",
     "Ingest version": "seed-timeline-wikipedia-v0.1",
     "Seed ID": "ifni-1969-06-30"
-  },
-  {
-    "Title": "Moon",
-    "Blurb": "Man's first landing on another world, the Moon, came with America's Apollo 11 mission in 1969. Photograph of the American astronaut Buzz Aldrin during the first moonwalk in 1969, taken by Neil Armstrong.",
-    "Date start": "1969-07-20",
-    "Precision": "day",
-    "Category": "milestone",
-    "Place": "Sea of Tranquility, Moon",
-    "Lat": 28.5729,
-    "Lng": -80.649,
-    "Notability": 1,
-    "Scope (intended)": "global",
-    "Source URL": "https://en.wikipedia.org/wiki/20th_century",
-    "Ingest version": "seed-timeline-wikipedia-v0.1",
-    "Seed ID": "moon-1969-07-20"
   },
   {
     "Title": "Libya",
