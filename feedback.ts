@@ -29,7 +29,11 @@ export const FEEDBACK_CONFIGURED = Boolean(WEBHOOK_URL && SECRET);
 // ===================== The accepted shape =====================
 
 const VERDICTS = ['up', 'down'] as const;
-const SCOPES = ['local', 'regional', 'national', 'global', 'unclassified'] as const;
+
+// 'universal' added in 0.6 alongside the tier itself -- see core.ts. Without
+// it a thumbs vote on a curated world-scale row (WWII, the 1918 flu...) would
+// 400 at this allowlist before it ever reached the worker.
+const SCOPES = ['local', 'regional', 'national', 'global', 'universal', 'unclassified'] as const;
 
 // Nine buckets, not six. The national tier's observed range is roughly
 // 1050-2400 km, so a single 500+ bucket would have swallowed the majority of
