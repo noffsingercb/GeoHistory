@@ -2,7 +2,7 @@
 
 *An open, geo-located historical events dataset and a deterministic timeline protocol. Give it a person's places and dates; get back a sourced timeline of the history that surrounded their life.*
 
-**Status:** v0.7 - comprehensive dataset (~106k events) + curated milestone seed layer (330 rows) + event-radius engine + JSON API (live on Render) + prune tooling
+**Status:** v0.7 - comprehensive dataset (116,295 events, `dump-v0.6`) + curated seed layers (`milestone`, `universal`) + event-radius engine with a distance-blind universal tier and ranged-event phases + JSON API (live on Render) + prune tooling
 
 ## Overview
 
@@ -22,19 +22,39 @@ Every event is scored on two independent axes so the timeline is both *placed* a
 - **Reach** (`scope` -> `reach_km`): how far the event's relevance radiates. An event matches you when your coordinate falls inside its reach circle. A county fair reaches ~40 km; a national election reaches its country; a world war reaches everywhere.
 - **Significance** (`significance`, 0..1): does anyone care? Era-normalized (decade percentile) so a standout 1600s event isn't buried under modern volume. Below a floor, events are dropped; above it, significance ranks them within per-scope quotas.
 
+There is a third scope, `universal`, that opts out of the first axis entirely: it is distance-blind and matches any segment it overlaps in time. It is drawn under its own `universalQuota` rather than through the round-robin fill, and it carries a deliberately severe floor, because significance is the only gate left on it.
+
+## Ranged events
+
+An event carrying a `date_end` is a candidate in **every** segment its range overlaps, and each occurrence is drawn with a `phase`: `begins` in the segment holding `date_start`, `ends` in the segment holding `date_end`, and `ongoing` where the segment sits inside the range with neither endpoint in it. A life that starts mid-war gets "World War II - ongoing" rather than nothing at all. 5,142 rows (4.4%) currently carry a `date_end`.
+
+The phase decides the **display date**, which is not the same as `date_start`. `phase-display.ts` owns that rule in one place so it is testable without a database: `ends` resolves to `date_end` at the coarser of the two precisions, `ongoing` resolves to the segment start at year precision, and everything else keeps `date_start`. Entries carry `displayDateISO` and `displayPrecision` alongside the raw dates.
+
+That resolved date is authoritative for **three** things in `core.ts` - the per-segment sort, the final sort, and the ~6-year bucketing in `applyTemporalSpread`. Keying any one of them on `date_start` while the others use the resolved date does not merely misorder a row, it silently deletes one: the entry is bucketed at a year it no longer displays, finds that bucket full, and is dropped with no error and no warning. `docs/engine-invariants.md` records this and the other invariants that are cheap to break and expensive to find.
+
 ## Pipeline
 
 ```
-ingest (sample)  OR  ingest:dump (comprehensive)  [+ seed: curated rows]   ->   score   ->   prune (optional cleanup)   ->   timeline / search / serve
+seed  ->  ingest:dump  ->  rescope:foundings  ->  prune:media  ->  prune:series
+      ->  merge-universal-dupes  ->  prune:dupes  ->  score  ->  expand:participants
+      ->  score  ->  titles                        ==  npm run post-ingest
+
+then:  timeline / search / stats / serve
 ```
+
+`npm run post-ingest` runs exactly that chain, in that order, and the order matters: `score` runs twice because `expand:participants` creates rows that have never been scored, and `titles` runs last because it reads the final scope and category of every surviving row. `npm run ingest` is the small live-SPARQL sample rather than a step in this chain.
 
 1. **Harvest** - two options:
    - `ingest.ts` (`npm run ingest`): quick sample via the live Wikidata SPARQL endpoint (1900-present). Good for tests.
    - `ingest-dump.ts` (`npm run ingest:dump`): the **comprehensive build** from a local Wikidata dump - no rate limits, ~750-year window, and **true date precision**.
-2. **Seed (curated rows, optional)** - `seed.ts` (`npm run seed`) merges hand-authored rows into the same `events` table, for categories that are better hand-curated than mined (currently: `milestone`, 330 invention/discovery-first events reviewed in Notion). Source rows live in era-bucketed files under `seed/` (split to avoid single-write truncation on large pushes) and are loaded idempotently: each row's id is `seed:<slug of title>`, and `ingest_version` starts with `seed-` so seed rows are always identifiable and re-seeding after an edit just upserts.
-3. `score.ts` (`npm run score`) derives the two axes and materializes the relevance radius. It **preserves the authored scope** on seed rows rather than recomputing it.
-4. **Prune (optional cleanup)** - `prune.ts` (`npm run prune <category> [floor] [apply]`) reviews and removes the least-notable rows within one category without re-running the ingest. A dry run (no floor, or a floor without `apply`) prints a notability histogram and shows how many rows each candidate floor would remove; passing `apply` deletes rows below the floor and rebuilds the FTS index. Useful for high-volume, uneven categories like `election`, where most harvested rows are minor local races.
-5. `core.ts` matches and ranks at query time using only the frozen columns.
+2. **Seed (curated rows)** - `seed.ts` (`npm run seed`) merges hand-authored rows into the same `events` table, for categories that are better hand-curated than mined (currently `milestone`, invention/discovery-firsts reviewed in Notion, and `universal`, the distance-blind tier). Source rows live in era-bucketed files under `seed/` (split to avoid single-write truncation on large pushes) and are loaded idempotently: each row's id is `seed:<slug of title>`, and `ingest_version` starts with `seed-` so seed rows are always identifiable and re-seeding after an edit just upserts.
+3. **Structural passes** - `rescope-foundings.ts` re-derives founding scope from `founding_kind`; `prune-media.ts`, `prune-series.ts`, `merge-universal-dupes.ts` and `prune-seed-dupes.ts` remove film/TV/franchise rows, recurring series instances, universal rows that duplicate a global twin, and seed rows the dump already covers.
+4. `score.ts` (`npm run score`) derives the two axes and materializes the relevance radius. It **preserves the authored scope** on seed rows rather than recomputing it.
+5. `expand-participants.ts` emits per-participant sibling rows for multi-party events, then `score` runs again over them.
+6. `display-titles.ts` (`npm run titles`) materializes `display_title` - "Birth of X", "Founding of X" - so the client never has to synthesize a label.
+7. `core.ts` matches and ranks at query time using only the frozen columns.
+
+`prune.ts` (`npm run prune <category> [floor] [apply]`) remains available outside the chain for reviewing and removing the least-notable rows within one category without re-running the ingest. A dry run (no floor, or a floor without `apply`) prints a notability histogram and shows how many rows each candidate floor would remove; passing `apply` deletes rows below the floor and rebuilds the FTS index. Useful for high-volume, uneven categories like `election`, where most harvested rows are minor local races.
 
 ### Comprehensive build (dumps)
 
@@ -64,10 +84,13 @@ Some categories are sparse or noisy straight from Wikidata (e.g. many elections,
 - Keep files reasonably small (tens of rows each) rather than one large file - very large single-file writes are prone to silent truncation depending on how they're pushed.
 - Add each new file to the `FILES` list in `seed.ts`, then run `npm run seed` followed by `npm run score`.
 - The `milestone` category (firsts in invention/discovery, e.g. the Moon Landing) is the first curated set, sourced from Wikipedia's "Timeline of historic inventions." Not every instance of a repeating milestone-adjacent category (e.g. presidential elections) is inherently notable - curation should keep only the genuinely important instances rather than every occurrence.
+- `seed/universal-v0.1.json` is the second: the distance-blind `universal` tier, where a row is on the timeline because it happened at all, not because of where it happened.
 
 ### Inspecting a build
 
 `npm run stats` prints a read-only composition report - total count, breakdown by category / date precision / scope, year span, sample year-precision events, and the `meta` provenance rows. Use it to sanity-check a build before shipping it.
+
+`npm run diag`, `npm run diagnose` and `npm run diagnose:dates` are the deeper reports: the v0.6 baseline, a defect sweep, and a date-range audit that lists rows which look ranged but carry no `date_end`. All three are read-only; `diagnose:dates` changes nothing without `--apply`.
 
 ## API service
 
@@ -101,6 +124,8 @@ Deployed as a Docker web service on **Render** (see `render.yaml`), which is the
 ```
 
 The response is the exact `Timeline` object `getTimeline()` returns (`entries` + `meta` + `datasetVersion`).
+
+**`GET /v1/meta` is not a deployment check.** It reports the short `dataset_version` from the `meta` table (`dump-v0.6`), which does not change when the dataset is rescored, repruned or re-uploaded - so it reads identically before and after a refresh. Confirming that new data is live means querying an actual row.
 
 ### Access control
 
@@ -138,13 +163,16 @@ Invalid input (missing segments, non-numeric coordinates, unparseable dates, an 
 | Key | Type | Range |
 | --- | --- | --- |
 | `significanceFloor` | number | 0.01 - 1 |
-| `scopeFloor.{local,regional,national,global}` | number | 0.01 - 1 |
+| `scopeFloor.{local,regional,national,global,universal}` | number | 0.01 - 1 |
 | `maxPerSegment` | integer | 1 - 50 |
 | `maxSegments` | integer | 1 - 40 |
 | `scopeQuota.{local,regional,national,global}` | integer | 0 - 25 |
 | `personQuota` | integer | 0 - 25 |
+| `universalQuota` | integer | 0 - 10 |
 | `categoryWeights.*` | number | 0 - 1 |
 | `foundingKindWeights.*` | number | 0 - 1 |
+
+`scopeQuota` accepts four scopes, not five, and that is deliberate: `core.ts` never reads `cfg.scopeQuota.universal`. The universal tier is filled from `universalQuota` instead, so adding a fifth entry here would be a knob that silently does nothing.
 
 The engine applies its own independent floor (`ABSOLUTE_MIN_FLOOR`) and a per-segment candidate-row ceiling (`MAX_CANDIDATE_ROWS`), so a caller reaching `getTimeline` directly -- bypassing the API -- still cannot ask it to scan the whole table.
 
@@ -158,6 +186,17 @@ docker build --build-arg DATASET_SHA256=$(sha256sum events.sqlite | cut -d' ' -f
 
 Builds without it still work and print the digest of what shipped, with a warning.
 
+**On Render it is not really optional.** `render.yaml` pins `DATASET_SHA256` as a service environment variable (Render has no separate Docker build-args screen; an env var is supplied to the build and binds to the matching `ARG`), and it does a second job there: build args participate in the layer cache key. Refresh the release asset without changing that value and every later deploy can reuse the cached download layer, shipping an old database while reporting success. `DATASET_VERSION` cannot be relied on for this - it is hand-edited and drifts out of step with what was actually uploaded.
+
+Refresh the pin whenever the asset changes:
+
+```bash
+gh release view dataset-latest --json assets \
+  --jq '.assets[] | select(.name=="events.sqlite") | .digest'
+```
+
+And read the asset's own `updatedAt` / `size` / `digest` rather than the release title or notes when checking what is published. The label is written by hand; the asset metadata is not.
+
 ## Repo layout
 
 | File | Purpose |
@@ -165,46 +204,64 @@ Builds without it still work and print the digest of what shipped, with a warnin
 | `schema.sql` | SQLite schema (`events`, `places`, `meta`) + `events_fts` search index |
 | `ingest.ts` | Sample harvester via live SPARQL (1900-present) |
 | `ingest-dump.ts` | Comprehensive harvester from a local Wikidata dump (true date precision) |
+| `migrate-v06.ts` | Schema migration to the v0.6 shape (`npm run migrate`) |
 | `seed.ts` | Curated seed loader - merges hand-authored rows from `seed/*.json` into `events`, idempotently (`npm run seed`) |
-| `seed/*.json` | Curated event rows exported from the Notion review table (currently: `milestone` inventions, 330 rows, era-bucketed into multiple files) |
+| `seed/*.json` | Curated event rows exported from the Notion review table (`milestone` inventions and the `universal` tier, era-bucketed into multiple files) |
 | `score.ts` | Build-time scorer: scope + significance (pass 1), reach + bbox (pass 2); preserves authored scope on seed rows |
+| `rescope-foundings.ts` | Re-derives founding scope from `founding_kind` (`npm run rescope:foundings`) |
+| `expand-participants.ts` | Per-participant sibling rows for multi-party events (`npm run expand:participants`) |
+| `display-titles.ts` | Materializes `display_title` - "Birth of X", "Founding of X" (`npm run titles`) |
 | `prune.ts` | Review + delete low-notability rows within one category without a full re-ingest (`npm run prune <category> [floor] [apply]`) |
+| `prune-media.ts` | Drops film / TV / franchise rows (`npm run prune:media`) |
+| `prune-series.ts` | Drops recurring series instances (`npm run prune:series`) |
+| `prune-seed-dupes.ts` | Drops seed rows the dump already covers (`npm run prune:dupes`) |
+| `merge-universal-dupes.ts` | Merges a universal row with its global twin, keeping the better blurb |
 | `core.ts` | Deterministic event-radius timeline engine (`getTimeline`) - importable, no side effects |
+| `phase-display.ts` | Resolves a ranged event's display date from its phase; vendored into Circa |
 | `timeline.ts` | CLI demo: runs `getTimeline` against `events.sqlite` |
 | `search.ts` | CLI full-text search over the dataset (`events_fts`) |
 | `stats.ts` | Read-only dataset diagnostics (counts by category / precision / scope + provenance) |
+| `diagnose-defects.ts` | Read-only defect sweep (`npm run diagnose`) |
+| `diagnose-date-ranges.ts` | Read-only report on rows that look ranged but carry no `date_end` (`npm run diagnose:dates`) |
+| `diagnostics/v06-baseline.ts` | The v0.6 baseline composition report (`npm run diag`) |
 | `server.ts` | JSON API wrapping `getTimeline` + search over `events.sqlite` (`npm run serve`) |
 | `net.ts` | Client-address derivation behind a proxy + the shared, bounded rate limiter |
 | `validate-config.ts` | Allowlist + clamp for the request `config` object |
 | `feedback.ts` | Vote validation, signing, and forwarding for `POST /v1/feedback` (writes nothing locally) |
+| `docs/engine-invariants.md` | Invariants in `core.ts` that are easy to break and expensive to debug |
+| `Dockerfile` | Image for the Render service; downloads and verifies `events.sqlite` at build time |
 | `render.yaml` | Render blueprint for the deployed service |
 
 `events.sqlite` is a build artifact (gitignored) and is published via GitHub Releases.
+
+The `Dockerfile` copies application sources **by explicit filename**. A new module reached from `server.ts` at any depth - including one imported by `core.ts` rather than by `server.ts` itself - has to be added to that `COPY` line, or the image builds clean, passes every check, and then exits at startup with `ERR_MODULE_NOT_FOUND`. This has happened twice.
 
 ## Relevance tuning
 
 Query-time knobs live in `DEFAULT_CONFIG` in `core.ts` (no rescoring needed):
 
 - `significanceFloor` (0.15) - drop events below this era-normalized importance.
-- `scopeFloor` (`local 0.05 / regional 0.15 / national 0.15 / global 0.2`) - per-tier override of the floor above, because dump events, humans, and curated seed rows enter on three different notability scales.
-- `scopeQuota` (`local 4 / regional 3 / national 4 / global 5`) plus `personQuota` (2) - per-segment cap **per tier**; the flood control that guarantees a blend of local color + world context. Births and deaths draw from their own `person` tier rather than competing with local history.
+- `scopeFloor` (`local 0.05 / regional 0.15 / national 0.15 / global 0.2 / universal 0.85`) - per-tier override of the floor above, because dump events, humans, and curated seed rows enter on three different notability scales. The universal floor is deliberately severe: that tier is distance-blind, so significance is the only gate left on it.
+- `scopeQuota` (`local 4 / regional 3 / national 4 / global 5`) plus `personQuota` (2) and `universalQuota` (2) - per-segment cap **per tier**; the flood control that guarantees a blend of local color + world context. Births and deaths draw from their own `person` tier rather than competing with local history. `universal` is **not** part of the round-robin fill - it is sliced off under its own quota before the round robin runs, which is also why universal rows never reach the temporal-spread pass. Assuming otherwise has already cost one wrong root-cause diagnosis.
 - `categoryWeights` (`birth 0.4 / death 0.5 / founding 0.7`) and `foundingKindWeights` (`settlement 0.35 / institution 0.5 / subnational 0.9 / country 0.9`) - rank multipliers; celebrity births and bare village incorporations are demoted vs. substantive history.
 
 Scope thresholds live in `score.ts` pass 1; the reach formula in pass 2. Retuning reach is a no-LLM patch: `npm run score reach`.
 
 ## Tests
 
-There is no test runner here by design. This repository is the dataset, its pipeline, and a read-only API over it; correctness of the *data* is checked by `npm run stats` and by the prune tooling's dry runs, both of which report on a real build rather than a fixture. `npx tsc --noEmit` in CI is the automated gate on the code, and the API's own validation layer is written to fail closed. Behavioral tests live in the client (Circa), where the assertions are cheap and the fixtures are small.
+There is no test runner here by design. This repository is the dataset, its pipeline, and a read-only API over it; correctness of the *data* is checked by `npm run stats`, the diagnostics above, and the prune tooling's dry runs, all of which report on a real build rather than a fixture. `npx tsc --noEmit` in CI (`.github/workflows/ci.yml`, alongside a hadolint pass over the `Dockerfile`) is the automated gate on the code, and the API's own validation layer is written to fail closed. Behavioral tests live in the client (Circa), where the assertions are cheap and the fixtures are small.
 
-The corollary is that nothing here exercises the running service, which is exactly how the rate limiter shipped inert: a typecheck cannot notice that a limit never fires. Deployment-shaped guarantees have to be measured against the live instance -- see the burst under Request limits.
+The corollary is that nothing here exercises the running service, which is exactly how the rate limiter shipped inert: a typecheck cannot notice that a limit never fires. CI also cannot build the image, because the build needs `events.sqlite`, which is gitignored - so the `Dockerfile`'s source list is only ever verified by a deploy. Deployment-shaped guarantees have to be measured against the live instance -- see the burst under Request limits.
 
 ## Known refinements (planned)
 
 - **Coordinate-less events** - events without their own `P625` (many elections, treaties, and agreements) are currently dropped, so those categories are under-represented; a country-centroid (`P17`) fallback would capture them.
 - **Scope threshold skew** - for scored (non-seed) categories, `scope` is derived from a notability threshold rather than the event's true geographic nature. This can misclassify comparably important events into different reach tiers (e.g. two national elections a few notability points apart landing in `national` vs. `regional`), under-serving the lower-scoring one outside its home region. Needs its own tuning pass, separate from significance.
+- **Missing `date_end`** - `npm run diagnose:dates` currently lists roughly 1,500 rows that read as ranged (wars, reigns, movements) but carry no end date, so they render as points.
 - **LLM semantic scoring** - pass 1 is currently a structural baseline (category + fame + decade percentile); a batched, cached LLM refiner will improve `scope` and `significance`.
 - **Place hierarchy** - matching is coordinate-based; the `places` admin hierarchy will be repopulated via coordinate reverse-geocoding.
 - **R-tree spatial index** - the portable bbox columns can be upgraded to a SQLite R-tree at full scale.
+- **VACUUM** - the published file is ~995 MB for 116,295 rows, mostly free pages left behind by five prune passes. SQLite does not return them without a `VACUUM`, which is deliberately not done in the image build.
 - **BCE / ancient events** - the dump ingester currently skips BCE dates.
 
 ## License
