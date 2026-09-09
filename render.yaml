@@ -22,8 +22,10 @@
 #
 #   gh release create dataset-latest events.sqlite --title "Dataset"
 #
-# After uploading a new dataset to that tag, bump DATASET_VERSION in the
-# Dockerfile or use "Clear build cache & deploy" -- otherwise Render reuses the
+# After uploading a new dataset to that tag, update DATASET_SHA256 below to the
+# new checksum. That is what makes the refresh land: the value is part of the
+# build cache key, so changing it forces the download layer to rebuild, and it
+# is also checked against the file that arrives. Without it Render reuses the
 # cached layer and ships the old database while reporting success.
 #
 # FREE INSTANCES SLEEP after roughly 15 minutes with no traffic, and the next
@@ -58,8 +60,10 @@ services:
     autoDeploy: true
 
     # /v1/health does not touch the database, which is what a liveness probe
-    # should be. /v1/meta is the readiness check and is worth curling by hand
-    # after a deploy -- it reports which dataset actually shipped.
+    # should be. /v1/meta is the readiness check, but note that it reports the
+    # SHORT dataset stamp only (dump-v0.6) and so reads identically before and
+    # after a rescore. To confirm which data actually shipped, query a window
+    # and inspect the rows.
     healthCheckPath: /v1/health
 
     envVars:
@@ -78,6 +82,29 @@ services:
       # in the blueprint makes it reviewable in the repo.
       - key: NODE_ENV
         value: production
+
+      # SHA-256 of the events.sqlite currently published to the dataset-latest
+      # release. Render has no separate "Docker build args" section: variables
+      # declared here are supplied to the build, and the Dockerfile already
+      # declares a matching `ARG DATASET_SHA256=`, so this value reaches the
+      # download step.
+      #
+      # It carries two jobs. It authenticates a file fetched over the network
+      # from a mutable tag, and -- because build args participate in the cache
+      # key -- changing it is what invalidates the cached download layer. That
+      # second job used to belong to DATASET_VERSION, which can no longer do it:
+      # that string already read prune5 while the running image still held the
+      # July database, so there was nothing left to bump.
+      #
+      # UPDATE THIS ON EVERY DATASET UPLOAD. The one-liner that prints it:
+      #
+      #   gh release view dataset-latest --json assets \
+      #     --jq '.assets[] | select(.name=="events.sqlite") | .digest'
+      #
+      # Set 2026-09-09 for dump-v0.6+struct-v0.7.2+reach-v0.3+universal-v0.1+
+      # participants-v0.1+prune5 (995,323,904 bytes, uploaded 15:37Z).
+      - key: DATASET_SHA256
+        value: 010b40c4eaa23b8eab5ba1b99a34b718ec910058082085c8762c8775ca978541
 
       # Number of hops between the internet and this process, counted from the
       # RIGHT of X-Forwarded-For. MEASURED, not assumed.
