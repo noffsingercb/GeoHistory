@@ -69,8 +69,9 @@ ARG DATASET_URL=https://github.com/noffsingercb/GeoHistory/releases/download/dat
 # that has to be edited in lockstep would simply be deleted the first time it
 # blocked a deploy. Get the value with:
 #   sha256sum events.sqlite
-# and pass it on the Render dashboard (Settings -> Build -> Docker build args)
-# or with --build-arg locally.
+# Render has no Docker build-args UI: set DATASET_SHA256 as a service
+# environment variable (render.yaml already does) and it is supplied to the
+# build and bound to this ARG. Locally, pass --build-arg.
 ARG DATASET_SHA256=
 
 WORKDIR /data
@@ -132,8 +133,8 @@ RUN echo "Fetching dataset ${DATASET_VERSION}" \
 # is left behind. The stray sidecar files are removed in case the uploaded
 # asset was accompanied by them.
 #
-# NOTE: this does not shrink the file. At ~930 MB for ~107k rows the database
-# is mostly free pages left by three prune passes; SQLite never returns those
+# NOTE: this does not shrink the file. At ~995 MB for ~116k rows the database
+# is mostly free pages left by five prune passes; SQLite never returns those
 # to the filesystem without a VACUUM. Vacuuming is deliberately NOT done here
 # -- it needs roughly double the file size in scratch space and would put a
 # multi-minute, disk-hungry step on the critical path of every deploy. Do it
@@ -208,12 +209,22 @@ COPY --from=deps /app/node_modules ./node_modules
 # file to the repo cannot quietly enlarge the image or leak local artifacts --
 # .dockerignore is the second line of defence, not the first.
 #
-# The trade-off is that a NEW module imported by server.ts must be added here or
-# the image builds clean and then dies on its first import. net.ts and
-# validate-config.ts are that case.
+# THE TRADE-OFF IS REAL AND HAS BITTEN TWICE. A new module reached by server.ts
+# -- at any depth, including one imported by core.ts rather than by server.ts
+# itself -- must be added to the COPY below, or the image builds clean, passes
+# every check, and then exits 1 on its first import at startup:
+#
+#   Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/app/phase-display.js'
+#   imported from /app/core.ts
+#
+# net.ts and validate-config.ts were the first case; phase-display.ts, added by
+# the ranged-row display-date fix, was the second. Nothing in CI catches this,
+# because CI typechecks the repo (where the file exists) and cannot build the
+# image (which needs events.sqlite). The check is this line, read against the
+# import graph.
 COPY package.json ./
 COPY tsconfig.json ./
-COPY server.ts core.ts feedback.ts net.ts validate-config.ts ./
+COPY server.ts core.ts phase-display.ts feedback.ts net.ts validate-config.ts ./
 
 # ---------------------------------------------------------------------------
 # The dataset
