@@ -25,7 +25,8 @@
     "timeline": "tsx timeline.ts",
     "search": "tsx search.ts",
     "stats": "tsx stats.ts",
-    "serve": "tsx server.ts"
+    "serve": "tsx server.ts",
+    "diagnose:dates": "tsx diagnose-date-ranges.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0"

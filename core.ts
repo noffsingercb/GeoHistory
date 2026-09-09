@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { displayDateFor, phaseSuffixFor } from './phase-display.js';
 
 // ===================== Public contract types =====================
 
@@ -99,6 +100,39 @@ export interface TimelineEntry {
   date: string;
   dateStartISO: string;
   dateEndISO: string;
+
+  /**
+
+   * The ISO day this occurrence renders and SORTS at, resolved from phase:
+
+   * 'ends' -> dateEndISO, 'ongoing' -> the life segment's start, otherwise
+
+   * dateStartISO. Added in 0.6.1. Clients grouping or sorting by year must
+
+   * use this, not dateStartISO -- that was the bug.
+
+   */
+
+  displayDateISO: string;
+
+  /**
+
+   * How much of displayDateISO is real. An 'ends' card takes the coarser of
+
+   * the start and end precisions (a row storing date_end '1991' normalizes
+
+   * to 1991-12-31 and must not print as 31 December). An 'ongoing' card is
+
+   * always 'year': it anchors to the person's segment start, and printing
+
+   * that day would attribute the person's date to the event.
+
+   */
+
+  displayPrecision: Precision;
+
+  /** The precision of the row's own date_start. */
+
   precision: Precision;
   lat: number;
   lng: number;
@@ -141,7 +175,7 @@ export interface Timeline {
  * Bump whenever output changes for identical input -- including tuning defaults,
  * not just code structure.
  */
-export const ENGINE_VERSION = 'geohistory-core@0.6.0';
+export const ENGINE_VERSION = 'geohistory-core@0.6.1';
 
 /**
  * The lowest significance the SQL prefilter will ever use, regardless of what a
@@ -341,15 +375,23 @@ interface EventRow {
   category: string | null; founding_kind: string | null; source_url: string | null;
 }
 
-function normalizeEventDate(row: EventRow): DateRange {
+/**
+ * endPrecision is the granularity of the stored date_end STRING, which is
+ * independent of date_precision: most ranged Wikidata rows carry a day-precise
+ * start and a year-only end ('1991'), and the 'ends' card must not print that
+ * as 31 December. See phase-display.ts.
+ */
+interface NormalizedDate extends DateRange { endPrecision: Precision; }
+
+function normalizeEventDate(row: EventRow): NormalizedDate {
   const start = (row.date_start as string).slice(0, 10);
   const s = parseDate(start);
   let precision: Precision = s.precision;
   if (row.date_precision && ['day', 'month', 'year', 'decade', 'century'].includes(row.date_precision)) {
     precision = row.date_precision as Precision;
   }
-  const hiISO = row.date_end ? parseDate((row.date_end as string).slice(0, 10)).hiISO : s.hiISO;
-  return { loISO: s.loISO, hiISO, precision };
+  const e = row.date_end ? parseDate((row.date_end as string).slice(0, 10)) : s;
+  return { loISO: s.loISO, hiISO: e.hiISO, precision, endPrecision: e.precision };
 }
 
 /** Normalize a stored scope string to a known tier, defaulting to the conservative one. */
@@ -414,7 +456,7 @@ function computeRangedOccurrences(
  * falls back to the next-best score. See item F, "Temporal spread inside a
  * segment".
  */
-function applyTemporalSpread<T extends { dateStartISO: string }>(
+function applyTemporalSpread<T extends { displayDateISO: string }>(
   pool: T[],
   segLo: string,
   segHi: string,
@@ -425,7 +467,7 @@ function applyTemporalSpread<T extends { dateStartISO: string }>(
   const hiYear = parseInt(segHi.slice(0, 4), 10);
   const span = Math.max(1, hiYear - loYear);
   const binYears = Math.max(1, Math.ceil(span / 6));
-  const binOf = (e: T) => Math.floor((parseInt(e.dateStartISO.slice(0, 4), 10) - loYear) / binYears);
+  const binOf = (e: T) => Math.floor((parseInt(e.displayDateISO.slice(0, 4), 10) - loYear) / binYears);
 
   const remaining = pool.slice(); // already score-sorted
   const binCounts = new Map<number, number>();
@@ -550,7 +592,7 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
   // Every segment's SQL + row-level filtering runs first and in full. Pass 2
   // needs this: deciding where a ranged row is allowed to be drawn requires
   // knowing every segment it overlaps, not just the one currently in hand.
-  type Draft = TimelineEntry & { hasDateEnd: boolean };
+  type Draft = TimelineEntry & { hasDateEnd: boolean; endPrecision: Precision };
 
   const segRanges: Array<{ lo: string; hi: string }> = [];
   const segmentCandidates: Draft[][] = [];
@@ -607,6 +649,12 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
         blurb: row.blurb,
         date: formatDate(ev.loISO, ev.precision),
         dateStartISO: ev.loISO, dateEndISO: ev.hiISO, precision: ev.precision,
+
+        // Provisional: the point-event answer, which is correct for every row
+
+        // without a date_end and is overwritten in pass 3 once phase is known.
+
+        displayDateISO: ev.loISO, displayPrecision: ev.precision,
         lat: row.lat, lng: row.lng,
         distanceKm: Math.round(distanceKm * 10) / 10,
         reachKm: row.reach_km,
@@ -614,6 +662,8 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
         significance, category: row.category, sourceUrl: row.source_url,
         segmentIndex, score,
         hasDateEnd: Boolean(row.date_end),
+
+        endPrecision: ev.endPrecision,
       });
     }
     segmentCandidates.push(drafts);
@@ -656,7 +706,43 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
         const occurrences = occurrencesById.get(d.id) ?? [];
         const occurrence = occurrences.find((o) => o.segmentIndex === segmentIndex);
         if (!occurrence) continue; // this segment lost the bookend assignment
-        matches.push({ ...d, phase: occurrence.phase });
+        // Resolve the date THIS occurrence renders and sorts at. Everything
+
+        // downstream -- the segment sort, the temporal-spread bins, the final
+
+        // entry sort, and the printed date -- keys off displayDateISO from
+
+        // here, which is the whole of this fix. See phase-display.ts.
+
+        const resolved = displayDateFor(
+
+          occurrence.phase,
+
+          d.dateStartISO,
+
+          d.dateEndISO,
+
+          d.precision,
+
+          d.endPrecision,
+
+          segRange.lo,
+
+        );
+
+        matches.push({
+
+          ...d,
+
+          phase: occurrence.phase,
+
+          displayDateISO: resolved.iso,
+
+          displayPrecision: resolved.precision,
+
+          date: formatDate(resolved.iso, resolved.precision),
+
+        });
       } else {
         matches.push(d);
       }
@@ -664,7 +750,7 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
 
     matches.sort((a, b) =>
       b.score !== a.score ? b.score - a.score :
-      a.dateStartISO !== b.dateStartISO ? (a.dateStartISO < b.dateStartISO ? -1 : 1) :
+      a.displayDateISO !== b.displayDateISO ? (a.displayDateISO < b.displayDateISO ? -1 : 1) :
       a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
     // Bucket the matches by draw tier, preserving the score order established
@@ -727,14 +813,14 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
 
     for (const m of kept) {
       drawCount.set(m.id, (drawCount.get(m.id) ?? 0) + 1);
-      const { hasDateEnd, ...entry } = m;
+      const { hasDateEnd, endPrecision, ...entry } = m;
       entries.push(entry);
     }
   });
 
   entries.sort((a, b) =>
-    a.dateStartISO < b.dateStartISO ? -1 :
-    a.dateStartISO > b.dateStartISO ? 1 :
+    a.displayDateISO !== b.displayDateISO ? (a.displayDateISO < b.displayDateISO ? -1 : 1) :
+    a.dateStartISO !== b.dateStartISO ? (a.dateStartISO < b.dateStartISO ? -1 : 1) :
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
   return {
@@ -751,7 +837,9 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
 export function renderMarkdown(t: Timeline): string {
   const out: string[] = [`# Timeline${t.person ? ` \u2014 ${t.person}` : ''}`, ''];
   for (const e of t.entries) {
-    const phaseSuffix = e.phase ? ` (${e.phase})` : '';
+    // Suppressed when the authored title already carries the verb, so
+    // 'Industrial Revolution begins' does not render as '... (begins)'.
+    const phaseSuffix = phaseSuffixFor(e.displayTitle, e.phase, ' ') ? ` (${e.phase})` : '';
     out.push(`- **${e.date}** \u2014 ${e.displayTitle}${phaseSuffix}`);
     if (e.blurb) out.push(`  ${e.blurb}`);
     out.push(`  _${e.tier} \u00b7 sig ${e.significance} \u00b7 ${e.distanceKm}/${e.reachKm} km${e.sourceUrl ? ` \u00b7 [source](${e.sourceUrl})` : ''}_`);
