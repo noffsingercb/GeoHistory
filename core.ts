@@ -456,7 +456,7 @@ function computeRangedOccurrences(
  * falls back to the next-best score. See item F, "Temporal spread inside a
  * segment".
  */
-function applyTemporalSpread<T extends { displayDateISO: string }>(
+function applyTemporalSpread<T extends { dateStartISO: string }>(
   pool: T[],
   segLo: string,
   segHi: string,
@@ -467,7 +467,7 @@ function applyTemporalSpread<T extends { displayDateISO: string }>(
   const hiYear = parseInt(segHi.slice(0, 4), 10);
   const span = Math.max(1, hiYear - loYear);
   const binYears = Math.max(1, Math.ceil(span / 6));
-  const binOf = (e: T) => Math.floor((parseInt(e.displayDateISO.slice(0, 4), 10) - loYear) / binYears);
+  const binOf = (e: T) => Math.floor((parseInt(e.dateStartISO.slice(0, 4), 10) - loYear) / binYears);
 
   const remaining = pool.slice(); // already score-sorted
   const binCounts = new Map<number, number>();
@@ -708,11 +708,11 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
         if (!occurrence) continue; // this segment lost the bookend assignment
         // Resolve the date THIS occurrence renders and sorts at. Everything
 
-        // downstream -- the segment sort, the temporal-spread bins, the final
+        // downstream -- the final entry sort and the printed date -- keys off
 
-        // entry sort, and the printed date -- keys off displayDateISO from
+        // displayDateISO. SELECTION deliberately does not: see the
 
-        // here, which is the whole of this fix. See phase-display.ts.
+        // matches.sort comment below. See phase-display.ts.
 
         const resolved = displayDateFor(
 
@@ -748,9 +748,17 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
       }
     }
 
+    // Deliberately dateStartISO, NOT displayDateISO. This sort decides
+    // WHICH rows are drawn -- it feeds the tier pools below and the
+    // universal slice -- and selection must not depend on where a card
+    // happens to render. Keying it on the display date dropped the Cold
+    // War: score 1.0 tied with its universal peers, the tiebreak moved
+    // 1947 -> 1991, and universalQuota 2 cut it. The entries.sort at the
+    // end of getTimeline is the one that orders OUTPUT, and that one does
+    // use displayDateISO.
     matches.sort((a, b) =>
       b.score !== a.score ? b.score - a.score :
-      a.displayDateISO !== b.displayDateISO ? (a.displayDateISO < b.displayDateISO ? -1 : 1) :
+      a.dateStartISO !== b.dateStartISO ? (a.dateStartISO < b.dateStartISO ? -1 : 1) :
       a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
     // Bucket the matches by draw tier, preserving the score order established
