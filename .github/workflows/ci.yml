@@ -54,6 +54,15 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # The runtime Docker stage copies root-level application modules by
+      # explicit filename. That avoids sweeping local scratch files into the
+      # image, but it has caused two green-build/dead-service deploys when a new
+      # imported module was not added to the COPY line. This guard walks the
+      # server.ts import graph and compares it to the runtime COPY list without
+      # building the image or needing events.sqlite.
+      - name: Check Docker runtime COPY imports
+        run: npx tsx scripts/check-docker-runtime-copy.ts
+
   dockerfile:
     name: Dockerfile lint
     runs-on: ubuntu-latest
