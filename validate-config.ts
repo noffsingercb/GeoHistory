@@ -23,7 +23,17 @@ import type { EngineConfig, Scope } from './core';
 // sparsity retry sends scopeFloor.local (RELAXED_LOCAL_FLOOR) when a segment
 // returns fewer than MIN_MATCHES entries. Clamp, do not delete.
 
-/** Scopes that accept a per-scope significance-floor override, including universal (0.6). */
+/**
+ * Scopes that accept a per-scope significance-floor override, including
+ * universal.
+ *
+ * The DEFAULT floor values are deliberately not restated here. This list
+ * answers one question -- which scopes may be overridden -- and the numbers
+ * live in DEFAULT_CONFIG.scopeFloor (core.ts), which is also what GET /v1/meta
+ * publishes under `defaults`. A previous version of this comment named a
+ * universal floor of 0.6 and went stale against the live 0.85; a comment that
+ * restates a constant defined in another file will always go stale again.
+ */
 const FLOOR_SCOPES: Scope[] = ['local', 'regional', 'national', 'global', 'universal'];
 
 /**
