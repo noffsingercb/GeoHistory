@@ -65,8 +65,12 @@ function fail(message: string): never {
  * enforces the same number independently in case a future key lands here
  * without one.
  *
- * universalQuota's 0-10 range and personFloor's 0.01-1 range were added in
- * 0.6 alongside the fields they bound in EngineConfig.
+ * personFloor's 0.01-1 range was added in 0.6 alongside the field it bounds
+ * in EngineConfig. universalQuota's ceiling was 10 until geohistory-core@0.7.0
+ * raised the default to 40 -- a bound below the shipped default would make the
+ * default itself a 400 on any client that sent it explicitly. It is now 100:
+ * still a real bound, since the knob is a safety valve (0 disables the tier),
+ * not an unbounded fan-out.
  */
 export const CONFIG_BOUNDS = {
   significanceFloor: { min: 0.01, max: 1, integer: false },
@@ -75,7 +79,7 @@ export const CONFIG_BOUNDS = {
   maxSegments: { min: 1, max: 40, integer: true },
   scopeQuota: { min: 0, max: 25, integer: true },
   personQuota: { min: 0, max: 25, integer: true },
-  universalQuota: { min: 0, max: 10, integer: true },
+  universalQuota: { min: 0, max: 100, integer: true },
   personFloor: { min: 0.01, max: 1, integer: false },
   categoryWeights: { min: 0, max: 1, integer: false },
   foundingKindWeights: { min: 0, max: 1, integer: false },

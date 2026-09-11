@@ -61,7 +61,11 @@ export interface EngineConfig {
    * How many universal rows may be drawn per segment. Additive: universal
    * entries sit ON TOP of maxPerSegment rather than counting against it, so a
    * segment can return up to maxPerSegment + universalQuota entries. Decided
-   * Sept 5 at 2, default below. See the UNIVERSAL DRAW comment on getTimeline.
+   * Sept 5 at 2 and raised to 40 on Sept 11: the curated seed is 34 rows, so
+   * the default cap now sits above the whole pool and every overlapping
+   * universal row draws. The knob remains a real cap -- universalQuota: 0
+   * still disables the tier outright. See the UNIVERSAL DRAW comment on
+   * getTimeline.
    */
   universalQuota: number;
   /**
@@ -175,7 +179,7 @@ export interface Timeline {
  * Bump whenever output changes for identical input -- including tuning defaults,
  * not just code structure.
  */
-export const ENGINE_VERSION = 'geohistory-core@0.6.1';
+export const ENGINE_VERSION = 'geohistory-core@0.7.0';
 
 /**
  * The lowest significance the SQL prefilter will ever use, regardless of what a
@@ -253,7 +257,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   maxSegments: 20,
   scopeQuota: { local: 4, regional: 3, national: 4, global: 5 },
   personQuota: 2,
-  universalQuota: 2,
+  universalQuota: 40,
   personFloor: 0.3,
   categoryWeights: { birth: 0.4, death: 0.5, founding: 0.7 },
 
@@ -815,7 +819,11 @@ export function getTimeline(db: Database.Database, input: TimelineInput): Timeli
     // universalQuota. Deliberately outside the round-robin above -- see
     // EngineConfig.universalQuota and the DEFAULT_CONFIG comment. pools.universal
     // is already score-sorted (matches was sorted before bucketing), so this is
-    // simply the top `universalQuota` of it.
+    // simply the top `universalQuota` of it -- and since the default cap (40)
+    // exceeds the curated seed (34 rows), that is normally the ENTIRE pool.
+    // Per-segment starvation was the 0.6 defect: a 35-year segment returned
+    // exactly two world events and silently dropped Apollo 11 and 9/11.
+    // universalQuota: 0 remains the way to switch the tier off.
     const universalKept = pools.universal.slice(0, cfg.universalQuota);
     for (const m of universalKept) kept.push(m);
 
