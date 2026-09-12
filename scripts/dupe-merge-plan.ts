@@ -1,5 +1,5 @@
 /**
- * dupe-merge-plan.ts - read-only merge planner. v3.
+ * dupe-merge-plan.ts - read-only merge planner. v3.1.
  *
  * Run from the repo root:
  *   npx tsx scripts/dupe-merge-plan.ts
@@ -19,19 +19,35 @@
  *   <= REVIEW_KM            -> REVIEW  (borderline, needs a human)
  *   >  REVIEW_KM            -> APART   (rejected; different places)
  *
- * It also drops two noise classes that review identified in v2's output:
+ * ---------------------------------------------------------------- v3.1
  *
- *   1. Parent/child sports rows. "athletics at the 1900 Summer Olympics" is a
- *      whole phrase inside "athletics at the 1900 Summer Olympics - men's
- *      shot put", which is an index row and its disciplines, not a duplicate.
- *      Any pair where the longer title merely APPENDS to the shorter is out.
- *      That was roughly 50 of v2's 400.
- *   2. Participant siblings. Rows with '#' in the id are per-participant
- *      expansions of a parent event (expand-participants.ts). v2 excluded
- *      same-base pairs but a seed row still matched each sibling separately,
- *      and worse, EXACT paired the 1814 Treaty of Paris against the 1815 one
- *      because one of them is a sibling row. Sibling rows are excluded
- *      entirely here; collapsing them is a separate ticket.
+ * Review of v3's own MERGE block found four defects. All four are fixed here,
+ * and each fix is deliberately conservative: when in doubt a pair is HELD for
+ * a human rather than merged, because an unmerged duplicate is a cosmetic
+ * problem and a wrong merge destroys a row.
+ *
+ *   1. The parent/child guard only rejected PREFIXES. It caught "athletics at
+ *      the 1900 Summer Olympics - men's shot put" but not "cycling at the
+ *      1906 intercalated games", which contains "intercalated games" as a
+ *      SUFFIX. That shape produced 12 bad merges (five 1906 disciplines, two
+ *      2012 Olympic sports, five 2015 European Games sports). Now: whenever
+ *      one title contains the other and the containing title has more tokens,
+ *      and neither row is a seed row, the pair is HELD. Seed rows are exempt
+ *      because "Constantinople" inside "Fall of Constantinople" is exactly
+ *      the narrative/entity duplicate we are hunting.
+ *   2. Cluster members were merged whenever they happened to be co-located.
+ *      Two seed rows both folded into the Peace of Westphalia at 0.3km, which
+ *      contradicts the hand decision to keep all four clause rows. A treaty
+ *      signed in one room generates N territorial clause rows that all sit on
+ *      the signing coordinates, so co-location proves nothing there. Any SEED
+ *      pair whose target is named by 2+ seed rows is now HELD.
+ *   3. Merges were emitted PAIRWISE. Q498979 appeared in two rows with two
+ *      different elected survivor dates, which is not a plan, it is a race.
+ *      Merges are now grouped transitively by shared row and each group
+ *      elects one survivor exactly once.
+ *   4. Three pairs are hand-verified non-duplicates and are denylisted, and
+ *      the surviving id now prefers a universal row so that merging a
+ *      universal slug with a QID row never renames the slug.
  *
  * Read-only. Opens the DB with readonly: true and issues no writes. The
  * output is a plan to be reviewed, not an applied change.
@@ -59,6 +75,29 @@ const MIN_SIGNIFICANCE = 0.55
 const CO_LOCATED_KM = 25
 const REVIEW_KM = 250
 const MAX_REVIEW_LINES = 60
+const MAX_HELD_LINES = 40
+
+/**
+ * Hand-verified non-duplicates. These survived every automated gate and were
+ * caught only by reading them, so they have to be named explicitly.
+ *
+ *   Q179001 / Q122371  - two different Treaties of Brest-Litovsk. The
+ *                        February one is Ukraine's, the March one is Russia's.
+ *   Q1150620 / Q150812 - the Slovak invasion of Poland was a real separate
+ *                        operation. Both rows carry national centroids, so
+ *                        they read as 0.0km apart.
+ *   seed:british-somaliland-1941-03-16 / Q1202078 - the seed row is the 1941
+ *                        British reconquest, the entity row is the 1940
+ *                        Italian invasion. Seven months apart, opposite
+ *                        directions.
+ */
+const DENYLIST = new Set(
+	[
+		['Q179001', 'Q122371'],
+		['Q1150620', 'Q150812'],
+		['seed:british-somaliland-1941-03-16', 'Q1202078'],
+	].map((p) => [...p].sort().join('||')),
+)
 
 const CANDIDATES = ['events.sqlite', 'data/events.sqlite', 'db/events.sqlite', 'geohistory.sqlite']
 
@@ -89,6 +128,7 @@ const titleOf = (r: Row) => String(r.display_title || r.title || '')
 const yearOf = (r: Row) => Number(String(r.date_start).slice(0, 4))
 const isSeed = (r: Row) => r.id.startsWith('seed:')
 const isSibling = (r: Row) => r.id.includes('#')
+const isUniversal = (r: Row) => r.scope === 'universal' || r.id.startsWith('universal:')
 
 function normalize(s: string): string {
 	return s
@@ -107,6 +147,8 @@ function normalize(s: string): string {
 		.replace(/\s+/g, ' ')
 		.trim()
 }
+
+const tokenCount = (s: string) => (s.length === 0 ? 0 : s.split(' ').length)
 
 /** Great-circle distance in km. Returns null when either row has no coords. */
 function distanceKm(a: Row, b: Row): number | null {
@@ -142,7 +184,7 @@ const all = db
 	.all(MIN_SIGNIFICANCE) as Row[]
 
 // Participant siblings are excluded outright, not just de-duplicated against
-// their own parent. See header note 2.
+// their own parent. Collapsing them is a separate ticket.
 const siblings = all.filter(isSibling)
 const rows = all.filter((r) => !isSibling(r))
 console.log('rows in scope: ' + rows.length + ' (excluded ' + siblings.length + ' participant-sibling rows)')
@@ -169,20 +211,34 @@ function near(r: Row, window: number): Row[] {
 	return out
 }
 
-type Pair = { rule: string; a: Row; b: Row; why: string; note: string }
+type Pair = {
+	rule: string
+	a: Row
+	b: Row
+	why: string
+	note: string
+	/** True when the pair must not be auto-merged even if co-located. */
+	hold?: string
+}
 
 const pairs: Pair[] = []
 const seen = new Set<string>()
 let rejectedAppend = 0
+let rejectedDeny = 0
 
-function add(rule: string, a: Row, b: Row, why: string, note = ''): void {
+function add(rule: string, a: Row, b: Row, why: string, note = '', hold?: string): void {
 	if (a.id === b.id) return
 	if (isSeed(a) && isSeed(b)) return
 	const key = [a.id, b.id].sort().join('||')
 	if (seen.has(key)) return
+	if (DENYLIST.has(key)) {
+		rejectedDeny++
+		seen.add(key)
+		return
+	}
 	seen.add(key)
 	const [x, y] = a.significance >= b.significance ? [a, b] : [b, a]
-	pairs.push({ rule, a: x, b: y, why, note })
+	pairs.push({ rule, a: x, b: y, why, note, hold })
 }
 
 // -------------------------------------------------------------- rule 1: EXACT
@@ -217,12 +273,32 @@ for (const r of rows) {
 		const longer = rn.length >= on.length ? rn : on
 		const shorter = rn.length >= on.length ? on : rn
 		if (!containsPhrase(longer, shorter)) continue
-		// The Olympic parent/discipline killer: if the longer title is the
-		// shorter one with something bolted onto the end, it is a child row.
+
+		// v3's guard: the longer title is the shorter one with something bolted
+		// onto the END. An index row and its disciplines. Silently dropped;
+		// this is the large class, ~350 pairs.
 		if (longer.startsWith(shorter + ' ')) {
 			rejectedAppend++
 			continue
 		}
+
+		// v3.1's fix: the shorter title sits anywhere else inside the longer
+		// one - "intercalated games" inside "cycling at the 1906 intercalated
+		// games". Also a parent/child shape, but v3 merged these. Seed rows are
+		// exempt: a place-titled seed row inside an event title is the real
+		// duplicate class we want.
+		if (!isSeed(r) && !isSeed(other) && tokenCount(longer) > tokenCount(shorter)) {
+			add(
+				'NEAR',
+				r,
+				other,
+				'"' + shorter + '" is a whole phrase inside "' + longer + '"',
+				'',
+				'parent/child title shape, neither row is a seed row',
+			)
+			continue
+		}
+
 		add('NEAR', r, other, '"' + shorter + '" is a whole phrase inside "' + longer + '"')
 	}
 }
@@ -260,16 +336,21 @@ for (const { seed, target, others } of seedBest) {
 	const notes: string[] = []
 	if (others > 0) notes.push(others + ' weaker candidate' + (others === 1 ? '' : 's') + ' ignored')
 	if (cluster > 1) notes.push('CLUSTER: ' + cluster + ' seed rows point at ' + target.id)
-	add('SEED', seed, target, 'seed blurb names "' + titleOf(target) + '"', notes.join('; '))
+	// A treaty signed in one room produces N territorial clause rows sitting
+	// on the signing coordinates. Co-location proves nothing about them, so
+	// they never auto-merge regardless of distance.
+	const hold = cluster > 1 ? 'cluster of ' + cluster + ' seed rows on ' + target.id + ', decided by hand' : undefined
+	add('SEED', seed, target, 'seed blurb names "' + titleOf(target) + '"', notes.join('; '), hold)
 }
 
 // ----------------------------------------------------------- the distance gate
-type Verdict = 'MERGE' | 'REVIEW' | 'APART'
+type Verdict = 'MERGE' | 'REVIEW' | 'APART' | 'HELD'
 
 const graded = pairs.map((p) => {
 	const km = distanceKm(p.a, p.b)
 	let verdict: Verdict
-	if (km == null) verdict = 'REVIEW'
+	if (p.hold) verdict = 'HELD'
+	else if (km == null) verdict = 'REVIEW'
 	else if (km <= CO_LOCATED_KM) verdict = 'MERGE'
 	else if (km <= REVIEW_KM) verdict = 'REVIEW'
 	else verdict = 'APART'
@@ -278,12 +359,6 @@ const graded = pairs.map((p) => {
 
 graded.sort((x, y) => yearOf(x.a) - yearOf(y.a))
 
-/**
- * Field election for a merge. Deliberately not "the entity row always wins":
- * review of the cluster set found seed rows carrying both the better score
- * and, in the NATO case, the better date. So each field is chosen on its own
- * merits and the losing value is printed so nothing disappears silently.
- */
 const PRECISION_RANK: Record<string, number> = { day: 3, month: 2, year: 1 }
 function precisionOf(r: Row): number {
 	const p = String(r.date_precision || '').toLowerCase()
@@ -297,23 +372,42 @@ function precisionOf(r: Row): number {
 
 const SCOPE_RANK: Record<string, number> = { local: 1, regional: 2, national: 3, global: 4, universal: 5 }
 
-function electFields(a: Row, b: Row) {
-	// Title: prefer the non-seed row, which is named after the event rather
-	// than the place it happened in.
-	const titleFrom = isSeed(a) && !isSeed(b) ? b : !isSeed(a) && isSeed(b) ? a : a
-	// Blurb: prefer the seed row, which is written as a sentence.
-	const blurbFrom = isSeed(a) ? a : isSeed(b) ? b : a
-	// Date: whichever is more precise, tie-break to the earlier one.
-	const pa = precisionOf(a)
-	const pb = precisionOf(b)
-	const dateFrom = pa !== pb ? (pa > pb ? a : b) : a.date_start <= b.date_start ? a : b
-	// Scope: the wider of the two, so a merged row is never demoted.
-	const scopeFrom = (SCOPE_RANK[a.scope] || 0) >= (SCOPE_RANK[b.scope] || 0) ? a : b
+/**
+ * Field election for a merge GROUP. Deliberately not "the entity row always
+ * wins": review of the cluster set found seed rows carrying both the better
+ * score and, in the NATO case, the better date. Each field is chosen on its
+ * own merits and every losing row is printed so nothing disappears silently.
+ */
+function electGroup(members: Row[]) {
+	const best = (list: Row[], pick: (x: Row, y: Row) => Row) => list.reduce(pick)
+	const entities = members.filter((r) => !isSeed(r))
+	const seeds = members.filter(isSeed)
+	const universals = members.filter(isUniversal)
+
+	// Title: prefer a non-seed row, which is named after the event rather than
+	// the place it happened in. Highest score breaks ties.
+	const titleFrom = best(entities.length ? entities : members, (x, y) => (y.significance > x.significance ? y : x))
+	// Surviving id: a universal row keeps its id, always. Merging a universal
+	// slug into a QID would silently rename a curated row.
+	const idFrom = universals.length
+		? best(universals, (x, y) => (y.significance > x.significance ? y : x))
+		: titleFrom
+	// Blurb: prefer a seed row, which is written as a sentence.
+	const blurbFrom = seeds.length ? best(seeds, (x, y) => (y.significance > x.significance ? y : x)) : titleFrom
+	// Date: whichever is most precise, tie-break to the earliest.
+	const dateFrom = best(members, (x, y) => {
+		const px = precisionOf(x)
+		const py = precisionOf(y)
+		if (px !== py) return py > px ? y : x
+		return y.date_start < x.date_start ? y : x
+	})
+	// Scope: the widest, so a merged row is never demoted.
+	const scopeFrom = best(members, (x, y) => ((SCOPE_RANK[y.scope] || 0) > (SCOPE_RANK[x.scope] || 0) ? y : x))
 	// Score: the max, per the decision not to rescore the seed premium away.
-	const scoreFrom = a.significance >= b.significance ? a : b
+	const scoreFrom = best(members, (x, y) => (y.significance > x.significance ? y : x))
 	// Span: the widest correct range.
-	const endFrom = (a.date_end || '') >= (b.date_end || '') ? a : b
-	return { titleFrom, blurbFrom, dateFrom, scopeFrom, scoreFrom, endFrom }
+	const endFrom = best(members, (x, y) => ((y.date_end || '') > (x.date_end || '') ? y : x))
+	return { titleFrom, idFrom, blurbFrom, dateFrom, scopeFrom, scoreFrom, endFrom }
 }
 
 // ------------------------------------------------------------------- output
@@ -332,32 +426,115 @@ const fmt = (r: Row) =>
 const merges = graded.filter((g) => g.verdict === 'MERGE')
 const reviews = graded.filter((g) => g.verdict === 'REVIEW')
 const aparts = graded.filter((g) => g.verdict === 'APART')
+const helds = graded.filter((g) => g.verdict === 'HELD')
+
+// ------------------------------------------------------- transitive grouping
+// v3 emitted one line per PAIR, so a target matched by two rows produced two
+// merge rows with two different elected dates. Group first, elect once.
+const parent = new Map<string, string>()
+function find(id: string): string {
+	let p = parent.get(id)
+	if (p === undefined) {
+		parent.set(id, id)
+		return id
+	}
+	while (p !== id) {
+		id = p
+		p = parent.get(id) as string
+	}
+	return id
+}
+function union(x: string, y: string): void {
+	const rx = find(x)
+	const ry = find(y)
+	if (rx !== ry) parent.set(rx, ry)
+}
+
+const rowById = new Map<string, Row>()
+for (const g of merges) {
+	rowById.set(g.a.id, g.a)
+	rowById.set(g.b.id, g.b)
+	union(g.a.id, g.b.id)
+}
+
+type Group = { members: Row[]; rules: Set<string>; maxKm: number }
+const groups = new Map<string, Group>()
+for (const g of merges) {
+	const root = find(g.a.id)
+	let grp = groups.get(root)
+	if (!grp) {
+		grp = { members: [], rules: new Set(), maxKm: 0 }
+		groups.set(root, grp)
+	}
+	for (const r of [g.a, g.b]) if (!grp.members.some((m) => m.id === r.id)) grp.members.push(r)
+	grp.rules.add(g.rule)
+	if (g.km != null && g.km > grp.maxKm) grp.maxKm = g.km
+}
+
+const groupList = [...groups.values()].sort((x, y) => yearOf(x.members[0]) - yearOf(y.members[0]))
+const multiRowGroups = groupList.filter((g) => g.members.length > 2)
 
 console.log('\n================ MERGE PLAN (co-located) ================')
-console.log('These passed the coordinate gate. Paste between the markers.\n')
+console.log('These passed the coordinate gate. One line per merge GROUP, not per pair.')
+console.log('Paste between the markers.\n')
 console.log('--- BEGIN MERGE TSV ---')
-console.log(['id', 'rule', 'year', 'km', 'survivor_title', 'survivor_date', 'survivor_scope', 'survivor_score', 'losing_row', 'kept_row'].join('\t'))
+console.log(
+	[
+		'id',
+		'rule',
+		'year',
+		'max_km',
+		'rows',
+		'survivor_id',
+		'survivor_title',
+		'survivor_date',
+		'survivor_scope',
+		'survivor_score',
+		'blurb_from',
+		'deleted_rows',
+	].join('\t'),
+)
 let m = 0
-for (const g of merges) {
+for (const grp of groupList) {
 	m++
-	const e = electFields(g.a, g.b)
-	const loser = e.titleFrom.id === g.a.id ? g.b : g.a
+	const e = electGroup(grp.members)
+	const losers = grp.members.filter((r) => r.id !== e.idFrom.id).map((r) => r.id)
 	console.log(
 		[
 			'M' + String(m).padStart(3, '0'),
-			g.rule,
-			yearOf(g.a),
-			g.km == null ? '?' : g.km.toFixed(1),
+			[...grp.rules].sort().join('+'),
+			yearOf(e.dateFrom),
+			grp.maxKm.toFixed(1),
+			grp.members.length,
+			e.idFrom.id,
 			titleOf(e.titleFrom),
 			e.dateFrom.date_start + (e.endFrom.date_end ? ' -> ' + e.endFrom.date_end : ''),
 			e.scopeFrom.scope,
 			Number(e.scoreFrom.significance).toFixed(3),
-			loser.id,
-			e.titleFrom.id,
+			e.blurbFrom.id,
+			losers.join(','),
 		].join('\t'),
 	)
 }
 console.log('--- END MERGE TSV ---')
+
+if (multiRowGroups.length > 0) {
+	console.log('\n  groups with more than two rows (these are the ones v3 got wrong):')
+	for (const grp of multiRowGroups) {
+		const e = electGroup(grp.members)
+		console.log('    ' + e.idFrom.id + ' <- ' + grp.members.map((r) => r.id).join(' + '))
+	}
+}
+
+console.log('\n================ HELD (co-located but not auto-merged) ================')
+console.log('These look like duplicates and sit close together, but a structural')
+console.log('reason says do not merge them automatically. Hand review only.\n')
+for (const g of helds.slice(0, MAX_HELD_LINES)) {
+	console.log([g.rule, yearOf(g.a), g.km == null ? 'no-coords' : g.km.toFixed(1) + 'km', g.hold].join('\t'))
+	console.log('    ' + fmt(g.a))
+	console.log('    ' + fmt(g.b))
+}
+if (helds.length > MAX_HELD_LINES) console.log('  ... and ' + (helds.length - MAX_HELD_LINES) + ' more')
 
 console.log('\n================ REVIEW (borderline distance) ================')
 console.log('Between ' + CO_LOCATED_KM + 'km and ' + REVIEW_KM + 'km, or missing coordinates.\n')
@@ -381,12 +558,16 @@ for (const g of farthest) {
 }
 
 console.log('\n================ SUMMARY ================')
-console.log('  MERGE  (co-located, planned): ' + merges.length)
+console.log('  MERGE  groups planned:        ' + groupList.length)
+console.log('  MERGE  rows they consume:     ' + groupList.reduce((n, g) => n + g.members.length, 0))
+console.log('  MERGE  groups over two rows:  ' + multiRowGroups.length)
+console.log('  HELD   (co-located, hand):    ' + helds.length)
 console.log('  REVIEW (borderline):          ' + reviews.length)
 console.log('  APART  (rejected by gate):    ' + aparts.length)
 console.log('  candidates generated:         ' + graded.length)
-console.log('  parent/child title pairs rejected before gating: ' + rejectedAppend)
-console.log('  participant-sibling rows excluded from scope:    ' + siblings.length)
+console.log('  parent/child appended titles rejected silently: ' + rejectedAppend)
+console.log('  hand-verified non-duplicates denylisted:        ' + rejectedDeny + ' of ' + DENYLIST.size)
+console.log('  participant-sibling rows excluded from scope:   ' + siblings.length)
 console.log('\n  Read-only. Nothing was written. The MERGE block is a proposal.')
 
 db.close()
