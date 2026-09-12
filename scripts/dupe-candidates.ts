@@ -1,26 +1,27 @@
 /**
- * dupe-candidates.ts - read-only candidate generator for hand review.
+ * dupe-candidates.ts - read-only candidate generator for hand review. v2.
  *
  * Run from the repo root:
  *   npx tsx scripts/dupe-candidates.ts
  *   npx tsx scripts/dupe-candidates.ts C:\\path\\to\\events.sqlite
  *
- * Produces a FINITE list of candidate duplicate pairs for a human to accept or
- * reject one by one. It is deliberately conservative: the earlier probe showed
- * that asking "does this row's blurb mention that row's title" in the wrong
- * direction matches World War I against WWII seed rows and the Holocaust
- * against Himmler's birthday. Three narrow rules only:
+ * v1 produced 2231 pairs and was not reviewable. Three things were wrong and
+ * are fixed here:
  *
- *   1. EXACT  - normalised titles are equal, start years within 5.
- *   2. NEAR   - one normalised title contains the other as a whole phrase
- *               (>= 12 chars), start years within 3.
- *   3. SEED   - a seed:* row's blurb contains the other row's title
- *               (>= 12 chars), start years within 1. This is the direction
- *               that works: the curated year-narrative sentence names the
- *               event it is about.
+ *   1. The normaliser deleted non-ASCII letters rather than folding them, so
+ *      "Lodz" collapsed to "d" and every Romanian/Ukrainian title turned to
+ *      gravel. Now NFD-folded, so "Criseni" compares as "criseni".
+ *   2. category='founding' rows are excluded from the title rules. Two rows
+ *      called "Founding of Cornesti" are two different villages that share a
+ *      name, not a duplicate. They are counted and reported, never paired.
+ *   3. EXACT now requires the same start year. A +/-5 year window paired the
+ *      1688 and 1690 sieges of Belgrade and two different Treaties of The
+ *      Hague, all of which must survive.
  *
- * Person rows (birth/death) are excluded outright. They are never duplicates
- * of an event, and they were the loudest false positives last time.
+ * The SEED rule is the one that earns its keep: a curated year-narrative row
+ * titled after a place, whose blurb names the event it is actually about.
+ * Each seed row now resolves to its single best target instead of emitting a
+ * line per candidate.
  *
  * Read-only. Opens the DB with readonly: true and issues no writes.
  */
@@ -40,10 +41,8 @@ type Row = {
 	significance: number
 }
 
-/** Only rows this significant are considered. Keeps the review list finite. */
 const MIN_SIGNIFICANCE = 0.55
-/** Hard stop, so nobody is handed a thousand rows to review. */
-const MAX_PAIRS = 250
+const MAX_PAIRS = 400
 
 const CANDIDATES = ['events.sqlite', 'data/events.sqlite', 'db/events.sqlite', 'geohistory.sqlite']
 
@@ -69,17 +68,30 @@ const dbPath = findDb()
 const db = new Database(dbPath, { readonly: true })
 console.log('db: ' + dbPath)
 
+// Printed so the next pass can use coordinates to separate same-named places.
+const cols = (db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string; type: string }>)
+	.map((c) => c.name + ':' + c.type)
+	.join(', ')
+console.log('events columns: ' + cols)
+
 const titleOf = (r: Row) => String(r.display_title || r.title || '')
 const yearOf = (r: Row) => Number(String(r.date_start).slice(0, 4))
+const isSeed = (r: Row) => r.id.startsWith('seed:')
 
 /**
- * Lowercase, drop a trailing phase word, drop a trailing parenthetical, drop a
- * leading year, drop punctuation. "Treaty of Paris (1783)" and "treaty of
- * paris" normalise together; "1883 eruption of Krakatoa" and "Eruption of
- * Krakatoa" do too.
+ * Fold diacritics, drop a trailing phase word, drop a trailing parenthetical,
+ * drop a leading year and a leading article, then reduce punctuation to
+ * spaces. Folding via NFD is the fix for v1's biggest bug: stripping
+ * non-ASCII letters outright made short titles out of long ones.
  */
 function normalize(s: string): string {
 	return s
+		.normalize('NFD')
+		.replace(/[\u0300-\u036f]/g, '')
+		.replace(/[\u0141\u0142]/g, 'l')
+		.replace(/[\u00d8\u00f8]/g, 'o')
+		.replace(/[\u00c6\u00e6]/g, 'ae')
+		.replace(/[\u00df]/g, 'ss')
 		.toLowerCase()
 		.replace(/\s*[-\u2013\u2014]\s*(begins?|ends?|began|ended)\s*$/i, '')
 		.replace(/\s*\([^)]*\)\s*$/, '')
@@ -90,13 +102,12 @@ function normalize(s: string): string {
 		.trim()
 }
 
-/** The QID without its participant suffix, so Q154697#Q55290 -> Q154697. */
 function baseId(id: string): string {
 	const hash = id.indexOf('#')
 	return hash === -1 ? id : id.slice(0, hash)
 }
 
-const rows = db
+const all = db
 	.prepare(
 		'SELECT id, scope, category, title, display_title, blurb, date_start, date_end, significance ' +
 			'FROM events ' +
@@ -105,9 +116,16 @@ const rows = db
 	)
 	.all(MIN_SIGNIFICANCE) as Row[]
 
-console.log('rows in scope: ' + rows.length + ' (significance >= ' + MIN_SIGNIFICANCE + ', no birth/death)')
+// Founding rows are excluded from pairing but counted, because "is this one
+// village or two villages with one name" is a different question needing
+// coordinates, not titles.
+const foundings = all.filter((r) => r.category === 'founding')
+const rows = all.filter((r) => r.category !== 'founding')
 
-// Bucket by start year so the pairwise work stays local to a few years.
+console.log(
+	'rows in scope: ' + rows.length + ' (excluded ' + foundings.length + ' founding rows; see FOUNDING NOTE below)',
+)
+
 const byYear = new Map<number, Row[]>()
 for (const r of rows) {
 	const y = yearOf(r)
@@ -127,28 +145,39 @@ function near(r: Row, window: number): Row[] {
 	return out
 }
 
-type Pair = { rule: string; a: Row; b: Row; why: string }
+type Pair = { rule: string; a: Row; b: Row; why: string; note: string }
 
 const pairs: Pair[] = []
 const seen = new Set<string>()
 
-function add(rule: string, a: Row, b: Row, why: string): void {
+function add(rule: string, a: Row, b: Row, why: string, note = ''): void {
 	if (a.id === b.id) return
-	// Participant siblings of the same parent are a different ticket.
 	if (baseId(a.id) === baseId(b.id)) return
-	const key = [rule, a.id, b.id].sort().join('||')
+	// Two seed rows for the same place in different years are two different
+	// events in a curated narrative, not a duplicate.
+	if (isSeed(a) && isSeed(b)) return
+	const key = [a.id, b.id].sort().join('||')
 	if (seen.has(key)) return
 	seen.add(key)
-	// Higher significance first, so "Row A" reads as the incumbent.
 	const [x, y] = a.significance >= b.significance ? [a, b] : [b, a]
-	pairs.push({ rule, a: x, b: y, why })
+	pairs.push({ rule, a: x, b: y, why, note })
+}
+
+/** A whole-word containment test, so "rus" does not match inside "rusu". */
+function containsPhrase(haystack: string, needle: string): boolean {
+	const i = haystack.indexOf(needle)
+	if (i === -1) return false
+	const before = i === 0 ? ' ' : haystack[i - 1]
+	const afterIndex = i + needle.length
+	const after = afterIndex >= haystack.length ? ' ' : haystack[afterIndex]
+	return before === ' ' && after === ' '
 }
 
 // -------------------------------------------------------------- rule 1: EXACT
 const byNormalized = new Map<string, Row[]>()
 for (const r of rows) {
 	const n = normalize(titleOf(r))
-	if (n.length < 6) continue
+	if (n.length < 8) continue
 	const list = byNormalized.get(n)
 	if (list) list.push(r)
 	else byNormalized.set(n, [r])
@@ -158,9 +187,9 @@ for (const [n, group] of byNormalized) {
 	if (group.length < 2) continue
 	for (let i = 0; i < group.length; i++) {
 		for (let j = i + 1; j < group.length; j++) {
-			const gap = Math.abs(yearOf(group[i]) - yearOf(group[j]))
-			if (gap > 5) continue
-			add('EXACT', group[i], group[j], 'normalised titles identical ("' + n + '"), start years ' + gap + ' apart')
+			// Same year only. Sieges and treaties recur in the same city.
+			if (yearOf(group[i]) !== yearOf(group[j])) continue
+			add('EXACT', group[i], group[j], 'identical titles ("' + n + '") in the same year')
 		}
 	}
 }
@@ -168,30 +197,57 @@ for (const [n, group] of byNormalized) {
 // --------------------------------------------------------------- rule 2: NEAR
 for (const r of rows) {
 	const rn = normalize(titleOf(r))
-	if (rn.length < 12) continue
-	for (const other of near(r, 3)) {
+	if (rn.length < 14) continue
+	for (const other of near(r, 1)) {
+		if (other.category !== r.category) continue
 		const on = normalize(titleOf(other))
-		if (on.length < 12) continue
+		if (on.length < 14) continue
 		if (on === rn) continue
 		const longer = rn.length >= on.length ? rn : on
 		const shorter = rn.length >= on.length ? on : rn
-		if (!longer.includes(shorter)) continue
-		add('NEAR', r, other, '"' + shorter + '" is contained in "' + longer + '"')
+		if (!containsPhrase(longer, shorter)) continue
+		add('NEAR', r, other, '"' + shorter + '" is a whole phrase inside "' + longer + '"')
 	}
 }
 
 // --------------------------------------------------------------- rule 3: SEED
+// One line per seed row: its single best target, with the runners-up counted
+// rather than emitted.
+const clusterCount = new Map<string, number>()
+const seedBest: Array<{ seed: Row; target: Row; others: number }> = []
+
 for (const seed of rows) {
-	if (!seed.id.startsWith('seed:')) continue
-	const blurb = String(seed.blurb || '').toLowerCase()
+	if (!isSeed(seed)) continue
+	const blurb = normalize(String(seed.blurb || ''))
 	if (blurb.length < 20) continue
+
+	let best: Row | null = null
+	let bestLen = 0
+	let hits = 0
 	for (const other of near(seed, 1)) {
-		if (other.id.startsWith('seed:')) continue
+		if (isSeed(other)) continue
 		const on = normalize(titleOf(other))
 		if (on.length < 12) continue
-		if (!normalize(blurb).includes(on)) continue
-		add('SEED', seed, other, 'seed blurb names "' + titleOf(other) + '"; same year')
+		if (!containsPhrase(blurb, on)) continue
+		hits++
+		// Prefer the most specific name the blurb commits to, then the
+		// better-scored row.
+		if (on.length > bestLen || (on.length === bestLen && best && other.significance > best.significance)) {
+			best = other
+			bestLen = on.length
+		}
 	}
+	if (!best) continue
+	seedBest.push({ seed, target: best, others: hits - 1 })
+	clusterCount.set(best.id, (clusterCount.get(best.id) || 0) + 1)
+}
+
+for (const { seed, target, others } of seedBest) {
+	const cluster = clusterCount.get(target.id) || 1
+	const notes: string[] = []
+	if (others > 0) notes.push(others + ' weaker candidate' + (others === 1 ? '' : 's') + ' ignored')
+	if (cluster > 1) notes.push('CLUSTER: ' + cluster + ' seed rows point at ' + target.id)
+	add('SEED', seed, target, 'seed blurb names "' + titleOf(target) + '"', notes.join('; '))
 }
 
 // ------------------------------------------------------------------- output
@@ -203,18 +259,39 @@ for (const p of pairs) counts.set(p.rule, (counts.get(p.rule) || 0) + 1)
 console.log('\n================ CANDIDATE PAIRS ================')
 console.log('Paste everything between the BEGIN and END markers back into chat.\n')
 console.log('--- BEGIN TSV ---')
-console.log(['pair', 'rule', 'year', 'a', 'b', 'why'].join('\t'))
+console.log(['pair', 'rule', 'year', 'a', 'b', 'why', 'note'].join('\t'))
 
-const emitted = pairs.slice(0, MAX_PAIRS)
 let n = 0
-for (const p of emitted) {
+for (const p of pairs.slice(0, MAX_PAIRS)) {
 	n++
-	const pid = 'C' + String(n).padStart(3, '0')
+	const pid = 'D' + String(n).padStart(3, '0')
 	const fmt = (r: Row) =>
 		[r.id, r.scope, r.category, r.date_start, r.date_end || '-', Number(r.significance).toFixed(3), titleOf(r)].join(' | ')
-	console.log([pid, p.rule, yearOf(p.a), fmt(p.a), fmt(p.b), p.why].join('\t'))
+	console.log([pid, p.rule, yearOf(p.a), fmt(p.a), fmt(p.b), p.why, p.note].join('\t'))
 }
 console.log('--- END TSV ---')
+
+// ---------------------------------------------------------- founding note
+console.log('\n================ FOUNDING NOTE ================')
+const byName = new Map<string, Row[]>()
+for (const f of foundings) {
+	const n2 = normalize(titleOf(f))
+	if (n2.length < 8) continue
+	const list = byName.get(n2)
+	if (list) list.push(f)
+	else byName.set(n2, [f])
+}
+let collidingNames = 0
+let collidingRows = 0
+for (const [, group] of byName) {
+	if (group.length < 2) continue
+	collidingNames++
+	collidingRows += group.length
+}
+console.log('  founding rows in scope: ' + foundings.length)
+console.log('  names shared by 2+ rows: ' + collidingNames + ' (' + collidingRows + ' rows)')
+console.log('  Not paired here. Same name + different coordinates = different village.')
+console.log('  Needs a coordinate test, not a title test. See the columns printed above.')
 
 console.log('\n================ SUMMARY ================')
 for (const [rule, c] of counts) console.log('  ' + rule + ': ' + c)
