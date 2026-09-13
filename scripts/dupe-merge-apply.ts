@@ -30,10 +30,33 @@ import {
 } from './lib/dupe-apply.js'
 import { CO_LOCATED_KM, buildPlan, electGroup, findDb, loadRows } from './lib/dupe-plan.js'
 
-const APPLY = process.argv.includes('--apply')
-const pathArg = process.argv.slice(2).find((a) => !a.startsWith('--'))
-const expectIndex = process.argv.indexOf('--expect-groups')
-const EXPECT_GROUPS = expectIndex !== -1 ? Number(process.argv[expectIndex + 1]) : undefined
+const argv = process.argv.slice(2)
+const APPLY = argv.includes('--apply')
+
+// --expect-groups takes a value. Parse it BEFORE looking for the optional
+// positional db path, otherwise `--expect-groups 132` hands "132" to findDb
+// and the run dies with "No file at <repo>\132" before planning anything.
+const inlineExpect = argv.find((a) => a.startsWith('--expect-groups='))
+const expectIndex = argv.indexOf('--expect-groups')
+const expectRaw = inlineExpect
+	? inlineExpect.slice('--expect-groups='.length)
+	: expectIndex !== -1
+		? argv[expectIndex + 1]
+		: undefined
+
+let EXPECT_GROUPS: number | undefined
+if (expectRaw !== undefined) {
+	EXPECT_GROUPS = Number(expectRaw)
+	if (!Number.isInteger(EXPECT_GROUPS) || EXPECT_GROUPS < 0) {
+		console.error('ABORT: --expect-groups needs a whole number, got: ' + String(expectRaw))
+		process.exit(1)
+	}
+}
+
+// The value that follows a bare `--expect-groups` is consumed by the flag and
+// must never be read as the db path.
+const consumedIndex = inlineExpect === undefined && expectIndex !== -1 ? expectIndex + 1 : -1
+const pathArg = argv.find((a, i) => !a.startsWith('--') && i !== consumedIndex)
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dbPath = findDb(pathArg)
