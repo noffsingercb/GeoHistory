@@ -61,7 +61,7 @@ services:
 
     # /v1/health does not touch the database, which is what a liveness probe
     # should be. /v1/meta is the readiness check, but note that it reports the
-    # SHORT dataset stamp only (dump-v0.6) and so reads identically before and
+    # SHORT dataset stamp only (dump-v0.6.1) and so reads identically before and
     # after a rescore. To confirm which data actually shipped, query a window
     # and inspect the rows.
     healthCheckPath: /v1/health
@@ -96,15 +96,29 @@ services:
       # that string already read prune5 while the running image still held the
       # July database, so there was nothing left to bump.
       #
-      # UPDATE THIS ON EVERY DATASET UPLOAD. The one-liner that prints it:
+      # UPDATE THIS ON EVERY DATASET UPLOAD, and read it back from the asset
+      # rather than trusting the upload command's exit code:
       #
-      #   gh release view dataset-latest --json assets \
+      #   gh api repos/noffsingercb/GeoHistory/releases/tags/dataset-latest \
       #     --jq '.assets[] | select(.name=="events.sqlite") | .digest'
       #
-      # Set 2026-09-09 for dump-v0.6+struct-v0.7.2+reach-v0.3+universal-v0.1+
-      # participants-v0.1+prune5 (995,323,904 bytes, uploaded 15:37Z).
+      # Set 2026-09-13 for dump-v0.6.1+struct-v0.7.2+reach-v0.3+universal-v0.1+
+      # participants-v0.1+prune5+dedupe1 (995,352,576 bytes, uploaded 20:27Z).
+      #
+      # dump-v0.6.1 is the duplicate-merge pass: 196 rows removed (133 by the
+      # automatic co-located planner, 63 from the hand-reviewed Notion table),
+      # leaving 116,099. Survivors inherit the best title, blurb, date
+      # precision, widest scope and highest significance of their group, so
+      # significance and reach_km were both recomputed afterwards. The universal
+      # tier is deliberately untouched at 34 rows.
+      #
+      # Checked before this value was written: journal_mode returned to rollback
+      # with no -wal/-shm left beside the file (a WAL-mode upload can publish a
+      # database missing committed rows while every local count still reads
+      # correctly), sqlite integrity_check ok, events_fts integrity-check ok,
+      # and the asset digest reported by the API equal to the local checksum.
       - key: DATASET_SHA256
-        value: 010b40c4eaa23b8eab5ba1b99a34b718ec910058082085c8762c8775ca978541
+        value: 011aea535c703b3a546eac62f3ab30b07df8817c1dc73b2d8320ee1247d696e0
 
       # Number of hops between the internet and this process, counted from the
       # RIGHT of X-Forwarded-For. MEASURED, not assumed.
