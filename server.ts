@@ -28,6 +28,14 @@ import {
   TRUSTED_PROXY_HOPS,
 } from './net';
 import { validateConfig, CONFIG_BOUNDS } from './validate-config';
+import {
+  nearbyEvents,
+  validateNearbyInput,
+  NearbyOverflowError,
+  NEARBY_BOUNDS,
+  NEARBY_VERSION,
+  type NearbyInput,
+} from './nearby';
 
 // ===================== geohistory JSON API (v1) =====================
 // A thin, dependency-free HTTP wrapper (Node built-in http) around the
@@ -38,13 +46,20 @@ import { validateConfig, CONFIG_BOUNDS } from './validate-config';
 // only live API point. Render terminates TLS and proxies to this process, which
 // is why TRUSTED_PROXY_HOPS exists and defaults to 1 -- see net.ts.
 //
-// Exactly five routes exist, all under /v1:
+// Exactly six routes exist, all under /v1:
 //   GET  /v1/health
 //   GET  /v1/meta
 //   GET  /v1/search?q=<term>&limit=<n>
 //   POST /v1/timeline            (?format=markdown for Markdown)
+//   POST /v1/nearby              (proximity query; see docs/nearby.md)
 //   POST /v1/feedback            (thumbs up/down; forwarded, never stored here)
 // Everything else 404s.
+//
+// /v1/nearby is a READ-ONLY query that is nevertheless a POST. A coordinate in
+// a query string ends up in browser history, Referer headers and proxy/CDN
+// access logs; the rule for this feature is that a precise coordinate never
+// appears in a URL, so the method follows the privacy requirement rather than
+// HTTP convention. Do not 'fix' it to GET -- docs/nearby.md records why.
 //
 // /v1/feedback is the one route that talks to the outside world. It still does
 // not write anything locally -- the database stays read-only -- it validates a
@@ -461,6 +476,10 @@ function datasetBuild(m: Record<string, unknown>): {
  * configBounds is published for the same reason. A client that knows the
  * accepted range can keep itself inside it rather than discovering a clamp as a
  * 400 in production.
+ *
+ * nearby is published on the same principle. A client running a radius ladder
+ * needs to know the accepted radius range, the limit range and the default
+ * coordinate mode; hardcoding them in the client is how the two drift apart.
  */
 function metaPayload(): Record<string, unknown> {
   const m = datasetMeta();
@@ -470,12 +489,14 @@ function metaPayload(): Record<string, unknown> {
     apiVersion: API_VERSION,
     serviceVersion: SERVICE_VERSION,
     engine: ENGINE_VERSION,
+    nearbyEngine: NEARBY_VERSION,
     datasetVersion: (m as any).dataset_version ?? null,
     datasetBuild: build.id,
     datasetLayers: build.layers,
     dataset: m,
     defaults: DEFAULT_CONFIG,
     configBounds: CONFIG_BOUNDS,
+    nearby: NEARBY_BOUNDS,
     limits: {
       maxBodyBytes: MAX_BODY_BYTES,
       maxSegments: MAX_SEGMENTS_ACCEPTED,
@@ -484,6 +505,7 @@ function metaPayload(): Record<string, unknown> {
       searchLimitMax: 100,
       absoluteMinFloor: ABSOLUTE_MIN_FLOOR,
       maxCandidateRows: MAX_CANDIDATE_ROWS,
+      maxNearbyCandidateRows: NEARBY_BOUNDS.maxCandidateRows,
       maxConcurrentTimelines: MAX_CONCURRENT_TIMELINES,
       rateLimit: { max: RATE_LIMIT_MAX, windowSeconds: RATE_LIMIT_WINDOW_MS / 1000 },
     },
@@ -558,7 +580,7 @@ const server = http.createServer(async (req, res) => {
       return finish(429);
     }
 
-    // 4. Routes — exactly five, all under /v1.
+    // 4. Routes — exactly six, all under /v1.
     if (method === 'GET' && path === '/v1/health') {
       sendJson(res, 200, { ok: true }, allowOrigin);
       return finish(200);
@@ -645,6 +667,60 @@ const server = http.createServer(async (req, res) => {
       return finish(200);
     }
 
+    // POST /v1/nearby — "what happened near here", a read-only proximity query.
+    //
+    // The method is the privacy decision, not an accident. A GET would put the
+    // caller's precise coordinate in a URL, and URLs are the most durable part
+    // of a request: browser history, Referer headers, and proxy / CDN access
+    // logs all retain the query string. The body is never logged, so a POST
+    // keeps the coordinate out of every one of those surfaces. Nothing here
+    // writes: the database is opened query_only, the response is no-store, and
+    // the coordinate is not stored, cached, or echoed in any error.
+    //
+    // It needs no admission-control slot. This is an indexed bounding-box scan
+    // bounded at 10k candidate rows, not a timeline build; the per-client rate
+    // limit is the appropriate guard.
+    if (method === 'POST' && path === '/v1/nearby') {
+      let raw: string;
+      try {
+        raw = await readBody(req);
+      } catch (e: any) {
+        const status = e?.status === 413 ? 413 : 400;
+        sendJson(res, status, { error: e?.message ?? 'Could not read request body.' }, allowOrigin);
+        return finish(status);
+      }
+
+      let parsed: any;
+      try { parsed = JSON.parse(raw || '{}'); }
+      catch {
+        sendJson(res, 400, { error: 'Request body is not valid JSON.' }, allowOrigin);
+        return finish(400);
+      }
+
+      let input: NearbyInput;
+      try { input = validateNearbyInput(parsed); }
+      catch (e: any) {
+        sendJson(res, 400, { error: e?.message ?? 'Invalid input.' }, allowOrigin);
+        return finish(400);
+      }
+
+      try {
+        const result = nearbyEvents(db, input);
+        sendJson(res, 200, result, allowOrigin);
+        return finish(200);
+      } catch (e: any) {
+        // Overflow is a 422 with a specific remedy. Everything else is generic:
+        // an internal message could otherwise carry request detail outward.
+        if (e instanceof NearbyOverflowError) {
+          sendJson(res, 422, { error: e.message }, allowOrigin);
+          return finish(422);
+        }
+        console.error(`${new Date().toISOString()} nearby failed: ${e?.message ?? e}`);
+        sendJson(res, 500, { error: 'Could not complete the nearby query.' }, allowOrigin);
+        return finish(500);
+      }
+    }
+
     // POST /v1/feedback — a thumb, coarsened by the client, forwarded to Notion.
     //
     // Two things make this route unlike the others. It has a second, tighter
@@ -722,8 +798,9 @@ server.listen(PORT, () => {
   const m = datasetMeta();
   console.log(`${SERVICE} listening on http://localhost:${PORT} (${API_VERSION})`);
   console.log(`  engine   ${ENGINE_VERSION}`);
+  console.log(`  nearby   ${NEARBY_VERSION}`);
   console.log(`  build    ${datasetBuild(m).id} - ${Number(m.totalEvents).toLocaleString()} events`);
-  console.log(`  routes:  GET /v1/health  GET /v1/meta  GET /v1/search  POST /v1/timeline  POST /v1/feedback`);
+  console.log(`  routes:  GET /v1/health  GET /v1/meta  GET /v1/search  POST /v1/timeline  POST /v1/nearby  POST /v1/feedback`);
   console.log(`  origins: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : 'none — set ALLOWED_ORIGIN'}${ALLOW_DEV_ORIGINS ? ' (+ dev localhost, ALLOW_DEV_ORIGINS=true)' : ''}`);
   console.log(`  limits:  ${RATE_LIMIT_MAX}/${RATE_LIMIT_WINDOW_MS / 1000}s per client · ${MAX_CONCURRENT_TIMELINES} concurrent timelines · trustedProxyHops=${TRUSTED_PROXY_HOPS}`);
   console.log(`  feedback: ${FEEDBACK_CONFIGURED ? 'forwarding to worker' : 'accept-and-drop (CIRCA_FEEDBACK_WEBHOOK_URL / CIRCA_FEEDBACK_SECRET unset)'}`);
