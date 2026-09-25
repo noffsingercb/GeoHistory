@@ -1,5 +1,9 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { CONFIG_BOUNDS, validateConfig } from '../validate-config.js';
 
+// Wire-shape limits that are not exported by the upstream config validator.
+// Every exported config min/max/integer rule below comes directly from
+// CONFIG_BOUNDS so validate-config.ts remains the numeric source of truth.
 export const INPUT_LIMITS = {
   personChars: 200,
   segmentCount: 40,
@@ -7,30 +11,31 @@ export const INPUT_LIMITS = {
   placeNameChars: 300,
   latitude: { min: -90, max: 90 },
   longitude: { min: -180, max: 180 },
-  floor: { min: 0.01, max: 1 },
-  maxPerSegment: { min: 1, max: 50 },
-  maxSegments: { min: 1, max: 40 },
-  scopeQuota: { min: 0, max: 25 },
-  personQuota: { min: 0, max: 25 },
-  universalQuota: { min: 0, max: 100 },
-  weight: { min: 0, max: 1 },
+  significanceFloor: CONFIG_BOUNDS.significanceFloor,
+  scopeFloor: CONFIG_BOUNDS.scopeFloor,
+  maxPerSegment: CONFIG_BOUNDS.maxPerSegment,
+  maxSegments: CONFIG_BOUNDS.maxSegments,
+  scopeQuota: CONFIG_BOUNDS.scopeQuota,
+  personQuota: CONFIG_BOUNDS.personQuota,
+  universalQuota: CONFIG_BOUNDS.universalQuota,
+  personFloor: CONFIG_BOUNDS.personFloor,
+  categoryWeights: CONFIG_BOUNDS.categoryWeights,
+  foundingKindWeights: CONFIG_BOUNDS.foundingKindWeights,
   weightKeys: 40,
   weightKeyChars: 60,
   searchChars: 200,
   searchLimit: { min: 1, max: 100, default: 25 },
 } as const;
 
-const num = (bounds: { min: number; max: number }, integer = false) => ({
-  type: integer ? 'integer' : 'number', minimum: bounds.min, maximum: bounds.max,
+const num = (bounds: { min: number; max: number; integer?: boolean }) => ({
+  type: bounds.integer ? 'integer' : 'number', minimum: bounds.min, maximum: bounds.max,
 } as const);
-const floor = num(INPUT_LIMITS.floor);
-const quota = num(INPUT_LIMITS.scopeQuota, true);
-const weightMap = {
+const weightMap = (bounds: { min: number; max: number; integer?: boolean }) => ({
   type: 'object',
   maxProperties: INPUT_LIMITS.weightKeys,
   propertyNames: { maxLength: INPUT_LIMITS.weightKeyChars, pattern: '^[A-Za-z0-9_-]+$' },
-  additionalProperties: num(INPUT_LIMITS.weight),
-} as const;
+  additionalProperties: num(bounds),
+} as const);
 
 export const TIMELINE_INPUT_SCHEMA: Tool['inputSchema'] = {
   type: 'object', additionalProperties: false, required: ['segments'],
@@ -57,22 +62,29 @@ export const TIMELINE_INPUT_SCHEMA: Tool['inputSchema'] = {
     config: {
       type: 'object', additionalProperties: false,
       properties: {
-        significanceFloor: floor,
+        significanceFloor: num(INPUT_LIMITS.significanceFloor),
         scopeFloor: {
           type: 'object', additionalProperties: false,
-          properties: { local: floor, regional: floor, national: floor, global: floor, universal: floor },
+          properties: {
+            local: num(INPUT_LIMITS.scopeFloor), regional: num(INPUT_LIMITS.scopeFloor),
+            national: num(INPUT_LIMITS.scopeFloor), global: num(INPUT_LIMITS.scopeFloor),
+            universal: num(INPUT_LIMITS.scopeFloor),
+          },
         },
-        maxPerSegment: num(INPUT_LIMITS.maxPerSegment, true),
-        maxSegments: num(INPUT_LIMITS.maxSegments, true),
+        maxPerSegment: num(INPUT_LIMITS.maxPerSegment),
+        maxSegments: num(INPUT_LIMITS.maxSegments),
         scopeQuota: {
           type: 'object', additionalProperties: false,
-          properties: { local: quota, regional: quota, national: quota, global: quota },
+          properties: {
+            local: num(INPUT_LIMITS.scopeQuota), regional: num(INPUT_LIMITS.scopeQuota),
+            national: num(INPUT_LIMITS.scopeQuota), global: num(INPUT_LIMITS.scopeQuota),
+          },
         },
-        personQuota: num(INPUT_LIMITS.personQuota, true),
-        universalQuota: num(INPUT_LIMITS.universalQuota, true),
-        personFloor: floor,
-        categoryWeights: weightMap,
-        foundingKindWeights: weightMap,
+        personQuota: num(INPUT_LIMITS.personQuota),
+        universalQuota: num(INPUT_LIMITS.universalQuota),
+        personFloor: num(INPUT_LIMITS.personFloor),
+        categoryWeights: weightMap(INPUT_LIMITS.categoryWeights),
+        foundingKindWeights: weightMap(INPUT_LIMITS.foundingKindWeights),
       },
     },
   },
@@ -82,7 +94,7 @@ export const SEARCH_INPUT_SCHEMA: Tool['inputSchema'] = {
   type: 'object', additionalProperties: false, required: ['query'],
   properties: {
     query: { type: 'string', minLength: 1, maxLength: INPUT_LIMITS.searchChars },
-    limit: { ...num(INPUT_LIMITS.searchLimit, true), default: INPUT_LIMITS.searchLimit.default },
+    limit: { type: 'integer', minimum: INPUT_LIMITS.searchLimit.min, maximum: INPUT_LIMITS.searchLimit.max, default: INPUT_LIMITS.searchLimit.default },
   },
 };
 
@@ -130,16 +142,6 @@ export function validateSearch(value: unknown): { query: string; limit?: number 
   return { query: args.query, ...(args.limit === undefined ? {} : { limit: args.limit as number }) };
 }
 
-function validateWeights(name: string, value: unknown) {
-  const weights = requireObject(value, `${name} must be an object.`);
-  const keys = Object.keys(weights);
-  if (keys.length > INPUT_LIMITS.weightKeys) throw new Error(`${name} must have at most ${INPUT_LIMITS.weightKeys} keys.`);
-  for (const key of keys) {
-    if (key.length > INPUT_LIMITS.weightKeyChars || !/^[A-Za-z0-9_-]+$/.test(key)) throw new Error(`${name} has an unacceptable key.`);
-    bounded(`${name}.${key}`, weights[key], INPUT_LIMITS.weight);
-  }
-}
-
 export function validateTimeline(value: unknown): JsonObject {
   const args = requireObject(value, 'Arguments must be an object.');
   closed('arguments', args, ['person', 'segments', 'config']);
@@ -158,26 +160,8 @@ export function validateTimeline(value: unknown): JsonObject {
     if (typeof segment.start !== 'string' || !segment.start) throw new Error(`segments[${i}].start is required.`);
     if (segment.end !== undefined && typeof segment.end !== 'string') throw new Error(`segments[${i}].end must be a string.`);
   });
-  if (args.config !== undefined) {
-    const config = requireObject(args.config, 'config must be an object.');
-    const keys = ['significanceFloor','scopeFloor','maxPerSegment','maxSegments','scopeQuota','personQuota','universalQuota','personFloor','categoryWeights','foundingKindWeights'];
-    closed('config', config, keys);
-    if (config.significanceFloor !== undefined) bounded('config.significanceFloor', config.significanceFloor, INPUT_LIMITS.floor);
-    if (config.personFloor !== undefined) bounded('config.personFloor', config.personFloor, INPUT_LIMITS.floor);
-    if (config.maxPerSegment !== undefined) bounded('config.maxPerSegment', config.maxPerSegment, INPUT_LIMITS.maxPerSegment, true);
-    if (config.maxSegments !== undefined) bounded('config.maxSegments', config.maxSegments, INPUT_LIMITS.maxSegments, true);
-    if (config.personQuota !== undefined) bounded('config.personQuota', config.personQuota, INPUT_LIMITS.personQuota, true);
-    if (config.universalQuota !== undefined) bounded('config.universalQuota', config.universalQuota, INPUT_LIMITS.universalQuota, true);
-    for (const [name, scopes, bounds, integer] of [
-      ['scopeFloor', ['local','regional','national','global','universal'], INPUT_LIMITS.floor, false],
-      ['scopeQuota', ['local','regional','national','global'], INPUT_LIMITS.scopeQuota, true],
-    ] as const) if (config[name] !== undefined) {
-      const group = requireObject(config[name], `config.${name} must be an object.`);
-      closed(`config.${name}`, group, scopes);
-      for (const [key, raw] of Object.entries(group)) bounded(`config.${name}.${key}`, raw, bounds, integer);
-    }
-    if (config.categoryWeights !== undefined) validateWeights('config.categoryWeights', config.categoryWeights);
-    if (config.foundingKindWeights !== undefined) validateWeights('config.foundingKindWeights', config.foundingKindWeights);
-  }
+  // Reuse the authoritative upstream allowlist and validation behavior rather
+  // than maintaining a second runtime config validator in the MCP layer.
+  if (args.config !== undefined) validateConfig(args.config);
   return args;
 }
