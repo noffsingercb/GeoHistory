@@ -4,8 +4,7 @@ import { INPUT_LIMITS } from './contracts.js';
 
 const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx', 'mcp/server.ts'], env: { ...process.env } as Record<string, string> });
 const client = new Client({ name: 'geohistory-mcp-smoke', version: '0.1.0' });
-const failureDetails = (response: { structuredContent?: unknown; content?: unknown }) =>
-  JSON.stringify(response.structuredContent ?? response.content, null, 2);
+const failureDetails = (response: unknown) => JSON.stringify(response, null, 2);
 try {
   await client.connect(transport);
   const listed = await client.listTools();
