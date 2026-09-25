@@ -222,9 +222,14 @@ COPY --from=deps /app/node_modules ./node_modules
 # because CI typechecks the repo (where the file exists) and cannot build the
 # image (which needs events.sqlite). The check is this line, read against the
 # import graph.
+#
+# STANDING RULE, because this is now the third module to need it: adding an
+# import to server.ts or core.ts is not finished until the imported file
+# appears on the COPY line below. nearby.ts (POST /v1/nearby) is here for
+# exactly that reason.
 COPY package.json ./
 COPY tsconfig.json ./
-COPY server.ts core.ts phase-display.ts feedback.ts net.ts validate-config.ts ./
+COPY server.ts core.ts phase-display.ts feedback.ts net.ts validate-config.ts nearby.ts ./
 
 # ---------------------------------------------------------------------------
 # The dataset
