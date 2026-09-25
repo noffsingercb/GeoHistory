@@ -13,7 +13,7 @@ GeoHistory answers one question: *"What was happening in and around the places w
 
 All intelligence is computed **once, at build time**, and frozen into static columns. Query time is pure lookups, so the same file drives both a server API and an in-browser applet.
 
-The scope of this repository is deliberately narrow: **the dataset, its ingest and scoring pipeline, and the read-only API that exposes them.** Presentation lives in Circa, a separate client.
+The scope of this repository is deliberately narrow: **the dataset, its ingest and scoring pipeline, and the read-only API that exposes them.** Presentation lives in Circa, a separate client. Locus, a second client, consumes the same API for proximity queries.
 
 ## The two axes of relevance
 
@@ -110,6 +110,7 @@ Deployed as a Docker web service on **Render** (see `render.yaml`), which is the
 | `GET /v1/meta` | dataset provenance + engine defaults, config bounds, and the request limits below |
 | `GET /v1/search?q=<term>&limit=<n>` | full-text search (default 25, max 100) |
 | `POST /v1/timeline` | body = `TimelineInput` JSON -> `Timeline` JSON; add `?format=markdown` for Markdown |
+| `POST /v1/nearby` | body = one coordinate + a radius -> the nearest events by distance, returned in date order |
 | `POST /v1/feedback` | a coarsened thumbs up/down, forwarded to a Notion Worker; never stored here |
 
 `POST /v1/timeline` takes a person's life segments and returns the ranked, cited timeline:
@@ -127,11 +128,23 @@ The response is the exact `Timeline` object `getTimeline()` returns (`entries` +
 
 **`GET /v1/meta` is not a deployment check.** It reports the short `dataset_version` from the `meta` table (`dump-v0.6`), which does not change when the dataset is rescored, repruned or re-uploaded - so it reads identically before and after a refresh. Confirming that new data is live means querying an actual row.
 
+### Proximity queries
+
+`POST /v1/nearby` answers the **inverse** of the timeline question. The timeline asks whether a caller's coordinate falls inside an event's reach circle; nearby orders events by the distance from the caller to the event's own point, ignoring `reach_km` entirely. Different predicate, different columns, different index (`idx_events_lat_lng` rather than `idx_events_reach_box`) - which is why it is a separate module and not a `config` flag on `getTimeline`.
+
+**It is a `POST` despite being a read**, because the request body carries a precise coordinate. A `GET` would put that coordinate in browser history, `Referer` headers, and proxy and CDN access logs. Nothing in the query path logs, caches, stores, or echoes it - not even in an error message, and not rounded.
+
+Selection is by distance; presentation is by date. The N nearest rows are chosen, then that set is re-sorted chronologically, so the caller reads a local history in order rather than the N oldest rows in the box. Ties break on distance, then `date_start`, then `id`.
+
+The route holds **no product policy**. The radius escalation ladder, the decision to hide births and deaths, and every piece of empty-state copy live in the client; `excludeCategories` is a generic parameter and the client passes its own list. `GET /v1/meta` publishes the full bounds block so a client never hardcodes a limit. A candidate set larger than 10,000 rows returns `422` rather than a silently truncated page. See `docs/nearby.md` for the contract, the edge cases, and the reasoning.
+
 ### Access control
 
 **CORS is not open.** Browser requests are refused unless their `Origin` is in the `ALLOWED_ORIGIN` allowlist, and once that allowlist is set, a `POST` arriving with no `Origin` header at all is refused too (set `ALLOW_NO_ORIGIN_POST=true` to permit `curl` and CI). Set `ALLOWED_ORIGIN` in the Render dashboard to the Circa origin before expecting the client to work -- until then the API is healthy and every browser call fails, which looks exactly like an outage.
 
 The live client is `https://circatimeline.org` (with `https://www.circatimeline.org` and the older `https://circa-2cg.pages.dev` also allowed). Matching is exact, so Cloudflare Pages **preview** deployments -- which get a generated hostname per build -- are refused by design. A preview that loads but fails at the timeline step is behaving correctly; do not widen the allowlist to a wildcard to make it work.
+
+A second client origin (Locus) gets appended to the same comma-separated value in the dashboard when it exists. The same rules apply: exact scheme and hostname, no trailing slash, no wildcard.
 
 Local dev origins (`localhost:5173/4173`) require an explicit `ALLOW_DEV_ORIGINS=true` **and** a non-production `NODE_ENV`. They are not admitted merely because `ALLOWED_ORIGIN` is unset.
 
@@ -148,6 +161,7 @@ Rate limiting is enforced **inside this process**. The free Render plan has no W
 | Tracked rate-limit keys | 10000 | `MAX_RATE_LIMIT_KEYS` |
 | Proxy hops in front of the process | 3 (Cloudflare edge -> Render LB -> node; measured) | `TRUSTED_PROXY_HOPS` |
 | Concurrent timeline builds | 4, then `503` | `MAX_CONCURRENT_TIMELINES` |
+| Nearby candidate rows | 10000, then `422` | - |
 | Request body | 64 KB | `MAX_BODY_BYTES` |
 | Request timeout | 15s | `REQUEST_TIMEOUT_MS` |
 | Segments per request | 40 | - |
@@ -155,6 +169,8 @@ Rate limiting is enforced **inside this process**. The free Render plan has no W
 | Years across all segments | 3000 | `MAX_TOTAL_SPAN_YEARS` |
 
 Invalid input (missing segments, non-numeric coordinates, unparseable dates, an out-of-range or over-long year span) returns a `400` with a specific message. Dates are parsed with the engine's own parser at validation time, so a request that passes validation cannot fail differently inside the engine.
+
+`POST /v1/nearby` shares the general request limiter and takes no concurrency slot: it is an indexed range scan rather than a multi-segment build. A client that requeries on map pan must debounce its own input; the limiter is the backstop, not the design.
 
 ### The `config` object
 
@@ -175,6 +191,8 @@ Invalid input (missing segments, non-numeric coordinates, unparseable dates, an 
 `scopeQuota` accepts four scopes, not five, and that is deliberate: `core.ts` never reads `cfg.scopeQuota.universal`. The universal tier is filled from `universalQuota` instead, so adding a fifth entry here would be a knob that silently does nothing.
 
 The engine applies its own independent floor (`ABSOLUTE_MIN_FLOOR`) and a per-segment candidate-row ceiling (`MAX_CANDIDATE_ROWS`), so a caller reaching `getTimeline` directly -- bypassing the API -- still cannot ask it to scan the whole table.
+
+`POST /v1/nearby` does not accept a `config` object. Its parameters are flat, individually bounded, and published under `nearby` in `GET /v1/meta`; an unknown field is a `400` rather than an ignored key.
 
 ### Dataset integrity
 
@@ -217,6 +235,7 @@ And read the asset's own `updatedAt` / `size` / `digest` rather than the release
 | `prune-seed-dupes.ts` | Drops seed rows the dump already covers (`npm run prune:dupes`) |
 | `merge-universal-dupes.ts` | Merges a universal row with its global twin, keeping the better blurb |
 | `core.ts` | Deterministic event-radius timeline engine (`getTimeline`) - importable, no side effects |
+| `nearby.ts` | Distance-first proximity query (`nearbyEvents`) over each event's own coordinate - importable, holds no product policy |
 | `phase-display.ts` | Resolves a ranged event's display date from its phase; vendored into Circa |
 | `timeline.ts` | CLI demo: runs `getTimeline` against `events.sqlite` |
 | `search.ts` | CLI full-text search over the dataset (`events_fts`) |
@@ -229,6 +248,7 @@ And read the asset's own `updatedAt` / `size` / `digest` rather than the release
 | `validate-config.ts` | Allowlist + clamp for the request `config` object |
 | `feedback.ts` | Vote validation, signing, and forwarding for `POST /v1/feedback` (writes nothing locally) |
 | `docs/engine-invariants.md` | Invariants in `core.ts` that are easy to break and expensive to debug |
+| `docs/nearby.md` | The proximity query's contract, ranking rule, privacy assertions, and client/server boundary |
 | `Dockerfile` | Image for the Render service; downloads and verifies `events.sqlite` at build time |
 | `render.yaml` | Render blueprint for the deployed service |
 
@@ -247,20 +267,22 @@ Query-time knobs live in `DEFAULT_CONFIG` in `core.ts` (no rescoring needed):
 
 Scope thresholds live in `score.ts` pass 1; the reach formula in pass 2. Retuning reach is a no-LLM patch: `npm run score reach`.
 
+The proximity query deliberately reuses none of this. It applies one low significance floor and no quotas, because a tier quota answers "give me a balanced timeline" and nearby answers "what is closest".
+
 ## Tests
 
-There is no test runner here by design. This repository is the dataset, its pipeline, and a read-only API over it; correctness of the *data* is checked by `npm run stats`, the diagnostics above, and the prune tooling's dry runs, all of which report on a real build rather than a fixture. `npx tsc --noEmit` in CI (`.github/workflows/ci.yml`, alongside a hadolint pass over the `Dockerfile`) is the automated gate on the code, and the API's own validation layer is written to fail closed. Behavioral tests live in the client (Circa), where the assertions are cheap and the fixtures are small.
+There is no test runner here by design. This repository is the dataset, its pipeline, and a read-only API over it; correctness of the *data* is checked by `npm run stats`, the diagnostics above, and the prune tooling's dry runs, all of which report on a real build rather than a fixture. `npx tsc --noEmit` in CI (`.github/workflows/ci.yml`, alongside a hadolint pass over the `Dockerfile`) is the automated gate on the code, and the API's own validation layer is written to fail closed. Behavioral tests live in the clients (Circa, Locus), where the assertions are cheap and the fixtures are small.
 
 The corollary is that nothing here exercises the running service, which is exactly how the rate limiter shipped inert: a typecheck cannot notice that a limit never fires. CI also cannot build the image, because the build needs `events.sqlite`, which is gitignored - so the `Dockerfile`'s source list is only ever verified by a deploy. Deployment-shaped guarantees have to be measured against the live instance -- see the burst under Request limits.
 
 ## Known refinements (planned)
 
-- **Coordinate-less events** - events without their own `P625` (many elections, treaties, and agreements) are currently dropped, so those categories are under-represented; a country-centroid (`P17`) fallback would capture them.
+- **Coordinate-less events** - events without their own `P625` (many elections, treaties, and agreements) are currently dropped, so those categories are under-represented; a country-centroid (`P17`) fallback would capture them. Note that such a fallback would also make `POST /v1/nearby`'s `coordinateMode` filter load-bearing, since a country centroid is not a place anything happened.
 - **Scope threshold skew** - for scored (non-seed) categories, `scope` is derived from a notability threshold rather than the event's true geographic nature. This can misclassify comparably important events into different reach tiers (e.g. two national elections a few notability points apart landing in `national` vs. `regional`), under-serving the lower-scoring one outside its home region. Needs its own tuning pass, separate from significance.
 - **Missing `date_end`** - `npm run diagnose:dates` currently lists roughly 1,500 rows that read as ranged (wars, reigns, movements) but carry no end date, so they render as points.
 - **LLM semantic scoring** - pass 1 is currently a structural baseline (category + fame + decade percentile); a batched, cached LLM refiner will improve `scope` and `significance`.
 - **Place hierarchy** - matching is coordinate-based; the `places` admin hierarchy will be repopulated via coordinate reverse-geocoding.
-- **R-tree spatial index** - the portable bbox columns can be upgraded to a SQLite R-tree at full scale.
+- **R-tree spatial index** - the portable bbox columns can be upgraded to a SQLite R-tree at full scale. This would also let the proximity query seek on both latitude and longitude instead of filtering longitude after a latitude range scan.
 - **VACUUM** - the published file is ~995 MB for 116,295 rows, mostly free pages left behind by five prune passes. SQLite does not return them without a `VACUUM`, which is deliberately not done in the image build.
 - **BCE / ancient events** - the dump ingester currently skips BCE dates.
 
