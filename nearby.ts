@@ -445,7 +445,10 @@ export function validateNearbyInput(body: unknown): NearbyInput {
     );
   }
 
-  let limit = NEARBY_BOUNDS.limit.default;
+  // Annotated `number`, not inferred: NEARBY_BOUNDS is `as const`, so the
+  // default's type is the literal 12 and assigning a caller's value below
+  // would not typecheck. The bounds check above is what constrains it.
+  let limit: number = NEARBY_BOUNDS.limit.default;
   if (b.limit != null) {
     if (!finiteNumber(b.limit) || !Number.isInteger(b.limit)) {
       throw new Error('limit must be an integer.');
@@ -458,7 +461,8 @@ export function validateNearbyInput(body: unknown): NearbyInput {
     limit = b.limit;
   }
 
-  let significanceFloor = NEARBY_BOUNDS.significanceFloor.default;
+  // Annotated for the same reason as `limit` above.
+  let significanceFloor: number = NEARBY_BOUNDS.significanceFloor.default;
   if (b.significanceFloor != null) {
     if (!finiteNumber(b.significanceFloor)) {
       throw new Error('significanceFloor must be a number.');
