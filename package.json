@@ -26,9 +26,12 @@
     "search": "tsx search.ts",
     "stats": "tsx stats.ts",
     "serve": "tsx server.ts",
+    "mcp": "tsx mcp/server.ts",
+    "mcp:smoke": "tsx mcp/smoke.ts",
     "diagnose:dates": "tsx diagnose-date-ranges.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
     "better-sqlite3": "^11.0.0"
   },
   "devDependencies": {
