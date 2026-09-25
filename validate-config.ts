@@ -44,9 +44,9 @@ const FLOOR_SCOPES: Scope[] = ['local', 'regional', 'national', 'global', 'unive
 const QUOTA_SCOPES: Scope[] = ['local', 'regional', 'national', 'global'];
 
 /** Weight maps are open-keyed by category, so they need their own bounds. */
-const MAX_WEIGHT_KEYS = 40;
-const MAX_WEIGHT_KEY_CHARS = 60;
-const WEIGHT_KEY_PATTERN = /^[a-z0-9_-]+$/i;
+export const MAX_WEIGHT_KEYS = 40;
+export const MAX_WEIGHT_KEY_CHARS = 60;
+export const WEIGHT_KEY_PATTERN = /^[a-z0-9_-]+$/i;
 
 function fail(message: string): never {
   throw new Error(message);
