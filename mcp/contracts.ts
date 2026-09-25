@@ -1,9 +1,15 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { CONFIG_BOUNDS, validateConfig } from '../validate-config.js';
+import {
+  CONFIG_BOUNDS,
+  MAX_WEIGHT_KEY_CHARS,
+  MAX_WEIGHT_KEYS,
+  WEIGHT_KEY_PATTERN,
+  validateConfig,
+} from '../validate-config.js';
 
-// Wire-shape limits that are not exported by the upstream config validator.
-// Every exported config min/max/integer rule below comes directly from
-// CONFIG_BOUNDS so validate-config.ts remains the numeric source of truth.
+// Wire-shape limits that are not part of the upstream config validator.
+// Config limits below reference its exported constants so there is one source
+// of truth for numeric bounds, map size, key length, and key pattern.
 export const INPUT_LIMITS = {
   personChars: 200,
   segmentCount: 40,
@@ -21,8 +27,8 @@ export const INPUT_LIMITS = {
   personFloor: CONFIG_BOUNDS.personFloor,
   categoryWeights: CONFIG_BOUNDS.categoryWeights,
   foundingKindWeights: CONFIG_BOUNDS.foundingKindWeights,
-  weightKeys: 40,
-  weightKeyChars: 60,
+  weightKeys: MAX_WEIGHT_KEYS,
+  weightKeyChars: MAX_WEIGHT_KEY_CHARS,
   searchChars: 200,
   searchLimit: { min: 1, max: 100, default: 25 },
 } as const;
@@ -33,7 +39,7 @@ const num = (bounds: { min: number; max: number; integer?: boolean }) => ({
 const weightMap = (bounds: { min: number; max: number; integer?: boolean }) => ({
   type: 'object',
   maxProperties: INPUT_LIMITS.weightKeys,
-  propertyNames: { maxLength: INPUT_LIMITS.weightKeyChars, pattern: '^[A-Za-z0-9_-]+$' },
+  propertyNames: { maxLength: INPUT_LIMITS.weightKeyChars, pattern: WEIGHT_KEY_PATTERN.source },
   additionalProperties: num(bounds),
 } as const);
 
