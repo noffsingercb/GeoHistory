@@ -26,6 +26,7 @@
     "search": "tsx search.ts",
     "stats": "tsx stats.ts",
     "serve": "tsx server.ts",
+    "test:nearby": "tsx --test nearby.test.ts",
     "mcp": "tsx mcp/server.ts",
     "mcp:smoke": "tsx mcp/smoke.ts",
     "diagnose:dates": "tsx diagnose-date-ranges.ts"
