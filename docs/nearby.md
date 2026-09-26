@@ -1,40 +1,10 @@
 # Nearby events (`POST /v1/nearby`)
 
-A generic proximity query over the same read-only `events.sqlite` the timeline
-engine uses. It answers one question: **which recorded events happened closest
-to this point?**
+A generic, read-only proximity query over `events.sqlite`. It selects by distance from one caller-supplied point and returns the selected set in date order. Radius escalation, category taste, copy, and map behavior belong to clients.
 
-## Why it is not the timeline query
+## Privacy
 
-| | Timeline (`core.ts`) | Nearby (`nearby.ts`) |
-| --- | --- | --- |
-| Predicate | caller's point is inside the event's reach circle | event's own point is within N km of the caller |
-| Columns | `reach_min_lat`..`reach_max_lng`, `reach_km` | `lat`, `lng` |
-| Index | `idx_events_reach_box` | `idx_events_lat_lng` |
-| Ranking | significance within per-scope quotas | distance, then date, then id |
-| `universal` scope | drawn deliberately, distance-blind | excluded by default; it is not *near* anything |
-
-A national election reaches its whole country, so the timeline engine is right
-to surface it 600 km away, and a proximity list would be wrong to. Reusing the
-reach box here would have produced a "nearby" list dominated by rows that are
-not nearby.
-
-## Why POST, for a read-only query
-
-The route is `POST` and the coordinate travels in the JSON body. This is not a
-write: nothing is stored, and the response carries `Cache-Control: no-store`
-like every other route.
-
-A `GET /v1/nearby?lat=...&lng=...` would put a person's precise location in a
-URL, and URLs are the most-copied, most-retained part of an HTTP request:
-browser history, `Referer` headers, proxy and CDN access logs, and platform
-request logs all keep the query string long after the response is gone. The
-governing rule for this feature is that a precise coordinate must never appear
-in a URL, so the method follows the privacy requirement rather than the other
-way round.
-
-The cost is one deliberate deviation from HTTP convention, which is recorded
-here so a later reader does not "fix" it.
+The coordinate is accepted only in a JSON POST body. It is never placed in a URL, logged, cached, stored, added to feedback, or echoed in an error. Responses use `Cache-Control: no-store`. Access logs contain method, normalized path, status, duration, and truncated client IP only.
 
 ## Request
 
@@ -55,102 +25,57 @@ here so a later reader does not "fix" it.
 
 | Field | Required | Default | Bounds |
 | --- | --- | --- | --- |
-| `lat` | yes | - | -90..90 |
-| `lng` | yes | - | -180..180 |
-| `radiusKm` | yes | - | 0.1..150 |
+| `lat` | yes | — | -90..90 |
+| `lng` | yes | — | -180..180 |
+| `radiusKm` | yes | — | 0.1..150 |
 | `limit` | no | 12 | 5..25 |
 | `significanceFloor` | no | 0.05 | 0.01..1 |
-| `coordinateMode` | no | `direct` | `direct` \| `all` |
-| `excludeCategories` | no | `[]` | <= 20 names, <= 40 chars each |
+| `coordinateMode` | no | `direct` | `direct` or `all` |
+| `excludeCategories` | no | `[]` | at most 20 non-empty names, 40 characters each |
 | `includeUniversal` | no | `false` | boolean |
-| `fromYear` / `toYear` | no | - | year 1..current+1, span <= 1000 years |
+| `fromYear` / `toYear` | no | — | integer year 1..current UTC year+1; span at most 1000 |
 
-Unknown fields return `400 Unknown nearby field(s): ...`. No error message ever
-contains the coordinate.
+Unknown fields return `400`. Candidate overflow returns `422 Candidate set exceeds 10000 rows; narrow the radius or date window.`
 
-### `coordinateMode`
+## Response identity
 
-`direct` admits rows whose point is the event's own: `coord_source` of `P625`
-(coordinate location), `P276` (stated location), or `NULL` (a curated seed row).
-It excludes `P17` / `P495` (country centroids) and `P19` / `P20` (a person's
-birth or death place). A country centroid is a real coordinate for a row that
-happened *somewhere in that country*, which is fine for a reach-based timeline
-and actively misleading for a proximity list -- it would make an arbitrary rural
-point the most historic place in the nation.
+The envelope carries both `datasetVersion` and `datasetBuild`. The first is the short ingest label. The second identifies the layered artifact and changes when scoring, reach, or prune state changes. Clients that compare responses across requests must use `datasetBuild` and retain `datasetVersion` only as a compatibility fallback.
 
-`all` disables the filter so the difference can be measured rather than assumed.
+## Geometry and dates
 
-## Response
+The bounding box is a conservative superset of the exact circle. Latitude delta uses the minimum meridional scale, `radiusKm / 110.574`; longitude uses the widest latitude in the band. Antimeridian boxes split into two ranges. A box reaching a pole scans every longitude in its narrow latitude band. Exact membership then uses haversine distance with `R = 6371 km`, matching `core.ts`.
 
-```json
-{
-  "datasetVersion": "dump-v0.6",
-  "engine": "geohistory-nearby@0.1.0",
-  "radiusKm": 15,
-  "coordinateMode": "direct",
-  "significanceFloor": 0.05,
-  "totalWithinRadius": 41,
-  "returned": 12,
-  "entries": [ { "id": "Q...", "distanceKm": 1.42, "...": "..." } ]
-}
+Date windows use inclusive year overlap:
+
+```sql
+CAST(substr(COALESCE(date_end, date_start), 1, 4) AS INTEGER) >= fromYear
+AND CAST(substr(date_start, 1, 4) AS INTEGER) <= toYear
 ```
 
-`totalWithinRadius` counts everything that passed the filters inside the radius,
-before the limit cut, so a client can tell "there are only three" from "we showed
-you twelve of four hundred" without a second request.
+A ranged event that began before the window remains eligible when its end reaches into it.
 
-## Ordering
+## Deterministic ordering
 
-Selection is by **distance**; presentation is by **date**.
+1. Apply generic filters and exact radius.
+2. Sort all matches by full-precision distance, `date_start`, then `id`.
+3. Take `limit`.
+4. Re-sort only that selected set by `date_start`, distance, then `id`.
+5. Round response distance to two decimal places.
 
-1. Bounding-box prefilter (indexed), then an exact haversine test at
-   `R = 6371 km` -- the same radius `core.ts` uses.
-2. Sort by distance, then `date_start`, then `id`.
-3. Cut to `limit`.
-4. Re-sort the selected rows by `date_start`, then distance, then `id`.
+SQLite natural row order never decides membership or output order.
 
-Step 4 makes the returned list read as local history. Sorting the whole
-candidate set by date and then cutting would return the oldest rows in the box,
-which is a different question.
+## Coordinate quality
 
-The id tiebreak is not decoration: many rows share a city-centre coordinate, and
-without it the same request could return a different list on the same data.
+`direct` admits `P625`, `P276`, and curated rows with a null coordinate source. It excludes country/origin centroids and birth/death-place fallbacks. `all` disables this filter so callers can measure the difference explicitly.
 
-## Boundaries
+## Resource bounds
 
-- **Antimeridian.** A box spanning +/-180 is split into two longitude ranges and
-  OR-ed. Without this, a location at 179.9E silently returns nothing.
-- **Poles.** When the box would contain a pole, the longitude filter is dropped
-  and the latitude band plus the exact distance test does the work.
-- **Empty is a real answer.** Open ocean returns `entries: []` with
-  `totalWithinRadius: 0`. The module does not widen the radius to avoid it.
+The SQL query asks for 10,001 candidates. The extra row proves overflow; it is never silently truncated into a plausible nearest list. The route shares the process-wide per-client limiter. `better-sqlite3` work is synchronous and therefore serialized by the Node event loop; production acceptance still includes a measured ceiling-case latency probe so that bounded does not get mistaken for cheap.
 
-## Overflow, not truncation
+## Deployment
 
-The candidate query reads at most `10000 + 1` rows. If the extra row comes back,
-the request fails with `422 Candidate set exceeds 10000 rows; narrow the radius
-or date window.` Returning a full page instead would be indistinguishable from a
-complete result, and a silently truncated "nearest" list is the one failure mode
-that is both invisible and wrong.
+`nearby.ts` must remain in the Dockerfile runtime `COPY` list. CORS stays exact-match and dashboard-configured. Append the eventual Locus production origin to `ALLOWED_ORIGIN`; do not hardcode it, allow a wildcard, or admit generated preview hostnames.
 
-## What lives in the client, not here
+## Regression coverage
 
-This module holds no product policy. Radius ladders ("try 5, then 15, then 50,
-then 150 km"), category taste ("most people do not want a list of births"),
-empty-state copy and map behaviour are all client decisions. `nearby.ts` answers
-one question at one radius, truthfully, and lets the caller decide what to do
-with the answer.
-
-## Privacy
-
-The coordinate is an input and never an output. It is not logged (access logs
-record method, path, status, duration and a truncated IP only), not cached, not
-stored, and never echoed in an error. `docs/engine-invariants.md` covers the
-engine-side rules; this is the route-side one.
-
-## Deployment note
-
-`nearby.ts` is reached from `server.ts`, so it **must** appear in the
-`Dockerfile`'s explicit `COPY` list. Omitting it produces an image that builds
-clean, passes CI, and then exits at startup with `ERR_MODULE_NOT_FOUND`. That
-has already happened twice with other modules.
+`npm run test:nearby` covers conservative circle bounds, both antimeridian directions, polar all-longitude behavior, ranged-event overlap, full artifact identity, and the 10,001-row overflow path. CI runs those tests with typechecking and the Docker import-copy guard.
