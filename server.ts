@@ -191,6 +191,7 @@ function corsHeaders(allowOrigin: string | null): Record<string, string> {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Expose-Headers': 'Retry-After',
     'Access-Control-Max-Age': '600',
   };
 }
