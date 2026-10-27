@@ -31,9 +31,24 @@
 
 
 # ---------------------------------------------------------------------------
+# Node runtime pin
+# ---------------------------------------------------------------------------
+# All three stages use the SAME exact tag, and it must equal .node-version.
+# CI fails if they drift (see "Assert Dockerfile Node matches .node-version").
+# Exact rather than floating (node:24-slim) so a deploy is reproducible and a
+# security bump is a reviewable one-line diff, not something that happens on
+# whichever day Render next rebuilds.
+#
+# 24.22.1 is the 2026-10-21 security release. Node 20 reached end of life on
+# 2026-04-30 and received none of those fixes (CVE-2026-111497 Brotli OOB
+# write, CVE-2026-105482 dns.resolve NUL truncation, the TLS hostname
+# bypasses, and the rest).
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Stage 1: the dataset
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS dataset
+FROM node:24.22.1-slim AS dataset
 
 # Several RUN steps below pipe into head, and a pipeline reports only the exit
 # status of its last command -- so a failing sqlite3 or a truncated read would
@@ -162,10 +177,10 @@ RUN echo "Journal mode before: $(sqlite3 events.sqlite 'PRAGMA journal_mode;')" 
 # ---------------------------------------------------------------------------
 # Stage 2: dependencies
 # ---------------------------------------------------------------------------
-# better-sqlite3 is a native module. Prebuilt binaries usually cover node:20 on
+# better-sqlite3 is a native module. Prebuilt binaries usually cover node:24 on
 # linux/amd64, but the toolchain is installed anyway so the build cannot start
 # silently depending on a prebuild that may not exist for the target platform.
-FROM node:20-slim AS deps
+FROM node:24.22.1-slim AS deps
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
@@ -186,7 +201,7 @@ RUN npm ci
 # ---------------------------------------------------------------------------
 # Stage 3: runtime
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS runtime
+FROM node:24.22.1-slim AS runtime
 
 # tini gives the container a real init so SIGTERM reaches node and a graceful
 # shutdown does not hang for the full kill timeout.
@@ -260,7 +275,7 @@ USER node
 
 EXPOSE 8787
 
-# Node 20 has global fetch, so the healthcheck needs no curl in the image.
+# Node has global fetch, so the healthcheck needs no curl in the image.
 # /v1/health is the cheap endpoint -- it does not touch the database, which is
 # what we want from a liveness probe. Readiness is /v1/meta.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

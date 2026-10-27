@@ -22,10 +22,13 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      # .node-version is the single source of truth for the Node version. The
+      # Dockerfile cannot read it, so the dockerfile job below asserts that
+      # every FROM line matches it.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: .node-version
           cache: npm
 
       - name: Install dependencies
@@ -47,6 +50,24 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+
+      # The image, not CI, is what Render runs. If a FROM line drifts from
+      # .node-version, CI would test one runtime while production serves
+      # another -- which is exactly how an EOL Node 20 stayed live.
+      - name: Assert Dockerfile Node matches .node-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="$(tr -d '[:space:]' < .node-version)"
+          echo "expected: node:${want}-slim"
+          grep -E '^FROM node:' Dockerfile
+          total=$(grep -cE '^FROM node:' Dockerfile)
+          good=$(grep -cE "^FROM node:${want//./\\.}-slim AS " Dockerfile || true)
+          if [ "$total" -ne 3 ] || [ "$good" -ne "$total" ]; then
+            echo "::error::Dockerfile FROM lines (${good}/${total} matching) do not all equal node:${want}-slim"
+            exit 1
+          fi
+          echo "All ${total} FROM lines use node:${want}-slim."
 
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
