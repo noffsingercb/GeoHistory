@@ -65,7 +65,17 @@ function walk(entry: string): Set<string> {
 
 function runtimeCopyFiles(dockerfile: string): Set<string> {
   const files = new Set<string>();
-  const stage3 = dockerfile.split(/\nFROM\s+node:20-slim\s+AS\s+runtime\b/i)[1] ?? dockerfile;
+  // Match the runtime stage by its name, not its base image tag. This used to
+  // hardcode node:20-slim, so the Node 24 bump would have made the split miss
+  // and the old `?? dockerfile` fallback would have silently scanned every
+  // stage's COPY lines instead of just the runtime's. A missing runtime stage
+  // is now a loud failure rather than a quietly weaker check.
+  const parts = dockerfile.split(/\nFROM\s+node:\S+\s+AS\s+runtime\b/i);
+  if (parts.length < 2) {
+    console.error('Could not find a "FROM node:<tag> AS runtime" stage in Dockerfile.');
+    process.exit(1);
+  }
+  const stage3 = parts[1];
   const logicalLines = stage3
     .replace(/\\\r?\n\s*/g, ' ')
     .split(/\r?\n/)
