@@ -271,9 +271,11 @@ The proximity query deliberately reuses none of this. It applies one low signifi
 
 ## Tests
 
-There is no test runner here by design. This repository is the dataset, its pipeline, and a read-only API over it; correctness of the *data* is checked by `npm run stats`, the diagnostics above, and the prune tooling's dry runs, all of which report on a real build rather than a fixture. `npx tsc --noEmit` in CI (`.github/workflows/ci.yml`, alongside a hadolint pass over the `Dockerfile`) is the automated gate on the code, and the API's own validation layer is written to fail closed. Behavioral tests live in the clients (Circa, Locus), where the assertions are cheap and the fixtures are small.
+CI runs typecheck, scoring-metadata, fixture-checker and nearby tests, the Docker runtime COPY import guard, and Dockerfile lint. Run the suites locally with `npm run test:score`, `npm run test:fixture`, and `npm run test:nearby`. These small synthetic tests do not replace checks against a real dataset. `npm run stats`, diagnostics and prune dry runs inspect an actual build.
 
-The corollary is that nothing here exercises the running service, which is exactly how the rate limiter shipped inert: a typecheck cannot notice that a limit never fires. CI also cannot build the image, because the build needs `events.sqlite`, which is gitignored - so the `Dockerfile`'s source list is only ever verified by a deploy. Deployment-shaped guarantees have to be measured against the live instance -- see the burst under Request limits.
+For the standing timeline fixtures, set `GEOHISTORY_DB` to a local copy of the desired `events.sqlite` and run `npx tsx render-fixture.ts verify`. The script opens it read-only and prints its dataset version. Baseline checks gate the exit code; documented open participant-selection gaps are printed separately. `verify --strict` also fails on those gaps. Other modes: `a`, `b`, `census`, and `trace "Cold War"`; append `--json` to `a` or `b` for full timeline JSON. The fixture inputs and dataset version matter: passing against one build does not verify another.
+
+`npm run mcp:smoke` exercises the configured live API, so a timeout or cold start can fail it independently of local tests. CI's COPY guard checks runtime import coverage, but it does not build or exercise the deployed image. Deployment-shaped guarantees must still be measured against the live instance -- see the burst under Request limits.
 
 ## Known refinements (planned)
 

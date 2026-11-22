@@ -30,7 +30,8 @@
     "test:nearby": "tsx --test nearby.test.ts",
     "mcp": "tsx mcp/server.ts",
     "mcp:smoke": "tsx mcp/smoke.ts",
-    "diagnose:dates": "tsx diagnose-date-ranges.ts"
+    "diagnose:dates": "tsx diagnose-date-ranges.ts",
+    "test:fixture": "tsx --test render-fixture-checks.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

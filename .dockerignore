@@ -52,6 +52,10 @@ prune-seed-dupes.ts
 stats.ts
 search.ts
 timeline.ts
+# Fixture tooling and its tests are development-only, not runtime imports.
+render-fixture.ts
+render-fixture-checks.ts
+render-fixture-checks.test.ts
 schema.sql
 
 # --- Local artifacts ---------------------------------------------------------
