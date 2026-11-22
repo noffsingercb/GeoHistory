@@ -37,6 +37,9 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Test scoring metadata
+        run: npm run test:score
+
       - name: Test nearby geometry, overlap, and overflow
         run: npm run test:nearby
 
