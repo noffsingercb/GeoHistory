@@ -13,7 +13,8 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 //
 // The blurb is the check: it is prose lifted from the source and routinely
 // states the span the reader expects. When date_start falls outside the year
-// range the blurb states, one of the two is wrong and a human should look.
+// range the blurb states, it is a candidate for human review, not proof of error.
+// Prose may describe a different event or a person's lifespan.
 //
 // This is a DIAGNOSTIC, not a fix. It never edits events. --apply writes a
 // candidate override list to seed/date-overrides.json for review, exactly the
@@ -99,9 +100,9 @@ function main() {
   );
   const hasDisplayTitle = columns.has('display_title');
 
-  // Only rows that could plausibly be long-running. A row with no blurb has
-  // nothing to check against, and single-day rows are out of scope here --
-  // this ticket is about spans.
+  // A row with no blurb has nothing to check against. Point occurrences for
+  // births and deaths are excluded below; their person descriptions often
+  // contain a lifespan or tenure, not the span of the occurrence itself.
   const rows = db.prepare(`
     SELECT id, title, ${hasDisplayTitle ? 'display_title' : 'NULL AS display_title'},
            blurb, date_start, date_end, scope, significance
@@ -115,8 +116,13 @@ function main() {
   }>;
 
   const findings: Finding[] = [];
+  let excludedLifeOccurrences = 0;
 
   for (const row of rows) {
+    if (row.id.endsWith('#birth') || row.id.endsWith('#death')) {
+      excludedLifeOccurrences++;
+      continue;
+    }
     const range = blurbRange(row.blurb);
     if (!range) continue;
     const startYear = yearOf(row.date_start);
@@ -144,9 +150,8 @@ function main() {
     } else if (startYear > range.hi) {
       findings.push({ ...base, kind: 'start-after-range' });
     } else if (endYear === null && range.hi > range.lo) {
-      // date_start agrees with the blurb, but P582 was missing at ingest, so
-      // the engine treats a real span as a point event -- which means it can
-      // never draw an 'ends' card no matter what the display-date fix does.
+      // The blurb contains a span and no end is stored. It may describe a
+      // different event, so this remains a candidate for human review.
       findings.push({ ...base, kind: 'missing-end' });
     }
   }
@@ -168,7 +173,8 @@ function main() {
     if (list.length > LIMIT) console.log(`  ... ${list.length - LIMIT} more (raise --limit=)`);
   };
 
-  console.log(`diagnose-date-ranges  db=${DB_PATH}  rows scanned=${rows.length}`);
+  console.log(`diagnose-date-ranges  db=${DB_PATH}  rows scanned=${rows.length}  birth/death occurrences excluded=${excludedLifeOccurrences}`);
+  console.log("Candidates only: blurb ranges may describe a different event; verify sources before changing dates.");
   section('date_start precedes the range the blurb states', byKind('start-before-range'));
   section('date_start follows the range the blurb states', byKind('start-after-range'));
   section('blurb states a span but date_end is missing', byKind('missing-end'));
