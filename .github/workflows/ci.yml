@@ -43,6 +43,9 @@ jobs:
       - name: Test fixture acceptance checks
         run: npm run test:fixture
 
+      - name: Test universal promotion audit
+        run: npm run test:universal-promotions
+
       - name: Test nearby geometry, overlap, and overflow
         run: npm run test:nearby
 

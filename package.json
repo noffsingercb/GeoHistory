@@ -31,7 +31,9 @@
     "mcp": "tsx mcp/server.ts",
     "mcp:smoke": "tsx mcp/smoke.ts",
     "diagnose:dates": "tsx diagnose-date-ranges.ts",
-    "test:fixture": "tsx --test render-fixture-checks.test.ts"
+    "test:fixture": "tsx --test render-fixture-checks.test.ts",
+    "audit:universal-promotions": "tsx scripts/audit-universal-promotions.ts",
+    "test:universal-promotions": "tsx --test scripts/audit-universal-promotions.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

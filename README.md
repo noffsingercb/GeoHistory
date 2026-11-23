@@ -271,7 +271,7 @@ The proximity query deliberately reuses none of this. It applies one low signifi
 
 ## Tests
 
-CI runs typecheck, scoring-metadata, fixture-checker and nearby tests, the Docker runtime COPY import guard, and Dockerfile lint. Run the suites locally with `npm run test:score`, `npm run test:fixture`, and `npm run test:nearby`. These small synthetic tests do not replace checks against a real dataset. `npm run stats`, diagnostics and prune dry runs inspect an actual build.
+CI runs typecheck, scoring-metadata, fixture-checker and nearby tests, the Docker runtime COPY import guard, and Dockerfile lint. Run the suites locally with `npm run test:score`, `npm run test:fixture`, and `npm run test:nearby`. These small synthetic tests do not replace checks against a real dataset. `npm run stats`, diagnostics and prune dry runs inspect an actual build. `GEOHISTORY_DB=/path/to/events.sqlite npm run audit:universal-promotions` inventories universal promotion misses without modifying the database. Missing QIDs may be intentional curated fallbacks, not proof of errors; this report does not enforce a reviewed allowlist or block seeding.
 
 For the standing timeline fixtures, set `GEOHISTORY_DB` to a local copy of the desired `events.sqlite` and run `npx tsx render-fixture.ts verify`. The script opens it read-only and prints its dataset version. Baseline checks gate the exit code; documented open participant-selection gaps are printed separately. `verify --strict` also fails on those gaps. Other modes: `a`, `b`, `census`, and `trace "Cold War"`; append `--json` to `a` or `b` for full timeline JSON. The fixture inputs and dataset version matter: passing against one build does not verify another.
 
