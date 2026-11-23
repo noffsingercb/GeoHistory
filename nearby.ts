@@ -1,7 +1,7 @@
 // ===================== Nearby events (v1) =====================
 // Generic one-radius proximity retrieval. Product policy belongs to clients.
 
-export const NEARBY_VERSION = 'geohistory-nearby@0.1.2';
+export const NEARBY_VERSION = 'geohistory-nearby@0.1.3';
 
 export interface NearbyDatabase {
   prepare(sql: string): {
@@ -16,6 +16,7 @@ const DIRECT_COORD_SOURCES = ['P625', 'P276'] as const;
 export const NEARBY_BOUNDS = {
   radiusKm: { min: 0.1, max: 200 },
   limit: { min: 5, max: 100, default: 12 },
+  offset: { min: 0, max: 9999, default: 0 },
   significanceFloor: { min: 0.01, max: 1, default: 0.05 },
   maxDateSpanYears: 1000,
   maxCandidateRows: 10000,
@@ -28,6 +29,7 @@ export interface NearbyInput {
   lng: number;
   radiusKm: number;
   limit: number;
+  offset?: number;
   significanceFloor: number;
   coordinateMode: CoordinateMode;
   excludeCategories: string[];
@@ -64,6 +66,7 @@ export interface NearbyResult {
   coordinateMode: CoordinateMode;
   significanceFloor: number;
   totalWithinRadius: number;
+  offset: number;
   returned: number;
   entries: NearbyEntry[];
 }
@@ -275,7 +278,8 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
         : compareText(a.row.id, b.row.id),
   );
 
-  const selected = withDistance.slice(0, input.limit);
+  const offset = input.offset ?? 0;
+  const selected = withDistance.slice(offset, offset + input.limit);
   selected.sort((a, b) =>
     a.row.date_start !== b.row.date_start
       ? compareText(a.row.date_start, b.row.date_start)
@@ -293,6 +297,7 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
     coordinateMode: input.coordinateMode,
     significanceFloor: input.significanceFloor,
     totalWithinRadius: withDistance.length,
+    offset,
     returned: selected.length,
     entries: selected.map(({ row, distanceKm }) => ({
       id: row.id,
@@ -318,7 +323,7 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
 // ===================== Request validation =====================
 
 const ACCEPTED_FIELDS = new Set([
-  'lat', 'lng', 'radiusKm', 'limit', 'significanceFloor', 'coordinateMode',
+  'lat', 'lng', 'radiusKm', 'limit', 'offset', 'significanceFloor', 'coordinateMode',
   'excludeCategories', 'includeUniversal', 'fromYear', 'toYear',
 ]);
 const MIN_YEAR = 1;
@@ -359,6 +364,14 @@ export function validateNearbyInput(body: unknown): NearbyInput {
       throw new Error(`limit must be between ${NEARBY_BOUNDS.limit.min} and ${NEARBY_BOUNDS.limit.max}.`);
     }
     limit = b.limit;
+  }
+
+  let offset: number = NEARBY_BOUNDS.offset.default;
+  if (b.offset != null) {
+    if (!finiteNumber(b.offset) || !Number.isInteger(b.offset) || b.offset < 0 || b.offset > NEARBY_BOUNDS.offset.max) {
+      throw new Error(`offset must be an integer between 0 and ${NEARBY_BOUNDS.offset.max}.`);
+    }
+    offset = b.offset;
   }
 
   let significanceFloor: number = NEARBY_BOUNDS.significanceFloor.default;
@@ -433,6 +446,7 @@ export function validateNearbyInput(body: unknown): NearbyInput {
     lng: b.lng,
     radiusKm: b.radiusKm,
     limit,
+    offset,
     significanceFloor,
     coordinateMode,
     excludeCategories,

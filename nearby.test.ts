@@ -100,3 +100,19 @@ test('large result sets select nearest 100 then return them in date order', () =
   assert.equal(result.entries.at(-1)?.id, 'Q0');
   db.close();
 });
+
+
+test('offset pages partition nearest results deterministically and retain date order', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL, display_title TEXT, blurb TEXT, date_start TEXT NOT NULL, date_end TEXT, date_precision TEXT, category TEXT, scope TEXT, significance REAL, notability REAL, coord_source TEXT, lat REAL, lng REAL, source_url TEXT); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`);
+  const insert = db.prepare(`INSERT INTO events VALUES (?, ?, NULL, NULL, ?, NULL, 'year', 'event', 'local', 0.5, 0.5, 'P625', 0, ?, 'https://example.test')`);
+  for (let i = 0; i < 61; i++) insert.run(`Q${i}`, `Event ${i}`, String(2000 - i), i / 1000);
+  const pages = [0, 25, 50].map(offset => nearbyEvents(db as unknown as NearbyDatabase, { ...BASE_INPUT, limit: 25, offset }));
+  assert.deepEqual(pages.map(p => p.returned), [25, 25, 11]);
+  assert.deepEqual(pages.map(p => p.offset), [0, 25, 50]);
+  assert.equal(new Set(pages.flatMap(p => p.entries.map(e => e.id))).size, 61);
+  assert.deepEqual(pages[1].entries.map(e => e.id), Array.from({length:25}, (_,i) => `Q${49-i}`));
+  assert.equal(validateNearbyInput({lat:0,lng:0,radiusKm:5}).offset, 0);
+  for (const offset of [-1, 10000, 1.2, '25']) assert.throws(() => validateNearbyInput({lat:0,lng:0,radiusKm:5,offset}));
+  db.close();
+});

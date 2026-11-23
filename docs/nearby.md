@@ -29,6 +29,7 @@ The coordinate is accepted only in a JSON POST body. It is never placed in a URL
 | `lng` | yes | — | -180..180 |
 | `radiusKm` | yes | — | 0.1..200 |
 | `limit` | no | 12 | 5..100 |
+| `offset` | no | 0 | integer 0..9999; skip this many nearest matches |
 | `significanceFloor` | no | 0.05 | 0.01..1 |
 | `coordinateMode` | no | `direct` | `direct` or `all` |
 | `excludeCategories` | no | `[]` | at most 20 non-empty names, 40 characters each |
@@ -58,7 +59,7 @@ A ranged event that began before the window remains eligible when its end reache
 
 1. Apply generic filters and exact radius.
 2. Sort all matches by full-precision distance, `date_start`, then `id`.
-3. Take `limit`.
+3. Skip `offset` and take `limit` from the nearest-first sequence. Each page is then sorted by date, so pages are not globally chronological. Clients should compare `datasetBuild` between pages and restart if it changes.
 4. Re-sort only that selected set by `date_start`, distance, then `id`.
 5. Round response distance to two decimal places.
 
