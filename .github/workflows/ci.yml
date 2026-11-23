@@ -43,6 +43,9 @@ jobs:
       - name: Test fixture acceptance checks
         run: npm run test:fixture
 
+      - name: Test read-only date diagnostic
+        run: npm run test:dates
+
       - name: Test universal promotion audit
         run: npm run test:universal-promotions
 

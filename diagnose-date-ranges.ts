@@ -91,8 +91,8 @@ type Finding = {
 };
 
 function main() {
-  const db = new Database(DB_PATH, { readonly: !APPLY });
-  db.pragma('journal_mode = WAL');
+  const db = new Database(DB_PATH, { readonly: !APPLY, fileMustExist: true });
+  if (APPLY) db.pragma('journal_mode = WAL');
 
   const columns = new Set(
     (db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>).map((c) => c.name),

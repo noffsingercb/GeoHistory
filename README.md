@@ -90,7 +90,7 @@ Some categories are sparse or noisy straight from Wikidata (e.g. many elections,
 
 `npm run stats` prints a read-only composition report - total count, breakdown by category / date precision / scope, year span, sample year-precision events, and the `meta` provenance rows. Use it to sanity-check a build before shipping it.
 
-`npm run diag`, `npm run diagnose` and `npm run diagnose:dates` are the deeper reports: the v0.6 baseline, a defect sweep, and a date-range audit that lists rows which look ranged but carry no `date_end`. All three are read-only; `diagnose:dates` changes nothing without `--apply`.
+`npm run diag`, `npm run diagnose` and `npm run diagnose:dates` are the deeper reports: the v0.6 baseline, a defect sweep, and a date-range audit that lists rows which look ranged but carry no `date_end`. All three are read-only by default; `diagnose:dates` changes nothing without `--apply`. With `--apply`, it overwrites `seed/date-overrides.json` with unapproved suggestions and opens the database for writing (including WAL mode and a diagnostic timestamp in `meta` when available). Review suggestions before use; do not run `--apply` on a production dataset.
 
 ## API service
 
