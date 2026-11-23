@@ -1,7 +1,7 @@
 // ===================== Nearby events (v1) =====================
 // Generic one-radius proximity retrieval. Product policy belongs to clients.
 
-export const NEARBY_VERSION = 'geohistory-nearby@0.1.1';
+export const NEARBY_VERSION = 'geohistory-nearby@0.1.2';
 
 export interface NearbyDatabase {
   prepare(sql: string): {
@@ -14,8 +14,8 @@ export type CoordinateMode = 'direct' | 'all';
 const DIRECT_COORD_SOURCES = ['P625', 'P276'] as const;
 
 export const NEARBY_BOUNDS = {
-  radiusKm: { min: 0.1, max: 150 },
-  limit: { min: 5, max: 25, default: 12 },
+  radiusKm: { min: 0.1, max: 200 },
+  limit: { min: 5, max: 100, default: 12 },
   significanceFloor: { min: 0.01, max: 1, default: 0.05 },
   maxDateSpanYears: 1000,
   maxCandidateRows: 10000,

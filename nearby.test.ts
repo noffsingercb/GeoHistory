@@ -3,6 +3,7 @@ import test from 'node:test';
 import Database from 'better-sqlite3';
 import {
   boundingBox,
+  validateNearbyInput,
   nearbyEvents,
   NearbyOverflowError,
   type NearbyDatabase,
@@ -75,4 +76,27 @@ test('candidate overflow fails instead of truncating', () => {
     }),
   };
   assert.throws(() => nearbyEvents(db, BASE_INPUT), NearbyOverflowError);
+});
+
+
+test('expanded bounds accept 200 km and 100 entries, but reject larger requests', () => {
+  const input = { lat: 0, lng: 0, radiusKm: 200, limit: 100 };
+  assert.equal(validateNearbyInput(input).limit, 100);
+  assert.throws(() => validateNearbyInput({ ...input, radiusKm: 200.01 }));
+  assert.throws(() => validateNearbyInput({ ...input, limit: 101 }));
+  assert.equal(validateNearbyInput({ lat: 0, lng: 0, radiusKm: 5 }).limit, 12);
+});
+
+test('large result sets select nearest 100 then return them in date order', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL, display_title TEXT, blurb TEXT, date_start TEXT NOT NULL, date_end TEXT, date_precision TEXT, category TEXT, scope TEXT, significance REAL, notability REAL, coord_source TEXT, lat REAL, lng REAL, source_url TEXT); CREATE INDEX idx_events_lat_lng ON events(lat, lng); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`);
+  const insert = db.prepare(`INSERT INTO events VALUES (?, ?, NULL, NULL, ?, NULL, 'year', 'event', 'local', 0.5, 0.5, 'P625', 0, ?, 'https://example.test')`);
+  for (let i = 0; i < 101; i++) insert.run(`Q${i}`, `Event ${i}`, String(1900 + (100 - i)), i / 1000);
+  const result = nearbyEvents(db as unknown as NearbyDatabase, { ...BASE_INPUT, radiusKm: 200, limit: 100 });
+  assert.equal(result.totalWithinRadius, 101);
+  assert.equal(result.returned, 100);
+  assert.equal(result.entries.some(e => e.id === 'Q100'), false);
+  assert.equal(result.entries[0].id, 'Q99');
+  assert.equal(result.entries.at(-1)?.id, 'Q0');
+  db.close();
 });

@@ -27,8 +27,8 @@ The coordinate is accepted only in a JSON POST body. It is never placed in a URL
 | --- | --- | --- | --- |
 | `lat` | yes | — | -90..90 |
 | `lng` | yes | — | -180..180 |
-| `radiusKm` | yes | — | 0.1..150 |
-| `limit` | no | 12 | 5..25 |
+| `radiusKm` | yes | — | 0.1..200 |
+| `limit` | no | 12 | 5..100 |
 | `significanceFloor` | no | 0.05 | 0.01..1 |
 | `coordinateMode` | no | `direct` | `direct` or `all` |
 | `excludeCategories` | no | `[]` | at most 20 non-empty names, 40 characters each |
