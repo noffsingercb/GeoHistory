@@ -148,6 +148,12 @@ A second client origin (Locus) gets appended to the same comma-separated value i
 
 Local dev origins (`localhost:5173/4173`) require an explicit `ALLOW_DEV_ORIGINS=true` **and** a non-production `NODE_ENV`. They are not admitted merely because `ALLOWED_ORIGIN` is unset.
 
+### Review universal promotion fallbacks
+
+`npm run audit:universal-promotions` is a read-only inventory of missing dump QIDs that universal seeds would otherwise promote. It mirrors the seed loader's predicate; a missing row may be an intentional curated fallback, not an error. Set `GEOHISTORY_DB` to the staged database to inspect; do not assume that a previous production asset proves the next ingest's contents.
+
+For a fully ingested, reviewed staging dataset, `npm run audit:universal-promotions -- --strict` exits nonzero if any missing QID lacks a reviewed exception in `seed/universal-fallback-exceptions.json`. Each exception must be an object with `qid` and a nonempty `reason`; the initially empty list does not silently approve any fallbacks. This check is deliberately opt-in and read-only: it does not modify the database, prevent `npm run seed` from writing, or replace a pre-write guard. Partial/slice ingests will naturally report more misses; review them separately. The audit is a checkpoint before a future release, not evidence that the current live deployment is correct.
+
 ### Request limits
 
 Rate limiting is enforced **inside this process**. The free Render plan has no WAF or edge rate limiter, and the client is a static bundle -- a limit in client code is not a limit. Requests are keyed on the client address derived from `X-Forwarded-For` per `TRUSTED_PROXY_HOPS` (see `net.ts`), IPv6 collapsed to a `/64` so a single allocation cannot rotate addresses to buy more budget.
