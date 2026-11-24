@@ -37,6 +37,24 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Test scoring metadata
+        run: npm run test:score
+
+      - name: Test fixture acceptance checks
+        run: npm run test:fixture
+
+      - name: Test read-only date diagnostic
+        run: npm run test:dates
+
+      - name: Test universal promotion audit
+        run: npm run test:universal-promotions
+
+      - name: Test reviewed duplicate audit
+        run: npm run test:reviewed-dupes
+
+      - name: Test seed verdict audit
+        run: npm run test:seed-verdicts
+
       - name: Test nearby geometry, overlap, and overflow
         run: npm run test:nearby
 

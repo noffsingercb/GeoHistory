@@ -402,10 +402,26 @@ migrate();
 if (MODE === 'all' || MODE === 'scores') runScoring();
 if (MODE === 'all' || MODE === 'reach') runReach();
 
-try {
-  const top = db.prepare(`SELECT ingest_version AS v, COUNT(*) AS c FROM events GROUP BY ingest_version ORDER BY c DESC LIMIT 1`).get() as { v?: string } | undefined;
-  if (top?.v) setMeta('dataset_version', String(top.v));
-} catch { /* ignore */ }
+// The published dataset label can include curated revisions beyond the base
+// ingest version. Record the modal source separately and never overwrite it.
+const top = db.prepare(`
+  SELECT ingest_version AS v, COUNT(*) AS c
+  FROM events
+  WHERE ingest_version IS NOT NULL AND ingest_version <> ''
+  GROUP BY ingest_version
+  ORDER BY c DESC, ingest_version ASC
+  LIMIT 1
+`).get() as { v: string } | undefined;
+if (top) {
+  setMeta('ingest_version_modal', top.v);
+  const published = db.prepare(`SELECT value FROM meta WHERE key = 'dataset_version'`).get() as { value: string | null } | undefined;
+  if (!published) {
+    setMeta('dataset_version', top.v);
+    console.log(`Initialized dataset_version from modal ingest version ${top.v}.`);
+  } else if (published.value !== top.v) {
+    console.log(`dataset_version left at ${published.value}; modal ingest version is ${top.v}.`);
+  }
+}
 
 db.close();
 console.log('Done. To retune relevance without rescoring, edit the pass-2 formula and run: npm run score reach');

@@ -90,7 +90,7 @@ Some categories are sparse or noisy straight from Wikidata (e.g. many elections,
 
 `npm run stats` prints a read-only composition report - total count, breakdown by category / date precision / scope, year span, sample year-precision events, and the `meta` provenance rows. Use it to sanity-check a build before shipping it.
 
-`npm run diag`, `npm run diagnose` and `npm run diagnose:dates` are the deeper reports: the v0.6 baseline, a defect sweep, and a date-range audit that lists rows which look ranged but carry no `date_end`. All three are read-only; `diagnose:dates` changes nothing without `--apply`.
+`npm run diag`, `npm run diagnose` and `npm run diagnose:dates` are the deeper reports: the v0.6 baseline, a defect sweep, and a date-range audit that lists rows which look ranged but carry no `date_end`. All three are read-only by default; `diagnose:dates` changes nothing without `--apply`. With `--apply`, it overwrites `seed/date-overrides.json` with unapproved suggestions and opens the database for writing (including WAL mode and a diagnostic timestamp in `meta` when available). The report excludes synthetic `#birth` and `#death` point occurrences, but other false positives remain: a blurb range may refer to something else. Review suggestions against sources before use; do not run `--apply` on a production dataset.
 
 ## API service
 
@@ -147,6 +147,12 @@ The live client is `https://circatimeline.org` (with `https://www.circatimeline.
 A second client origin (Locus) gets appended to the same comma-separated value in the dashboard when it exists. The same rules apply: exact scheme and hostname, no trailing slash, no wildcard.
 
 Local dev origins (`localhost:5173/4173`) require an explicit `ALLOW_DEV_ORIGINS=true` **and** a non-production `NODE_ENV`. They are not admitted merely because `ALLOWED_ORIGIN` is unset.
+
+### Review universal promotion fallbacks
+
+`npm run audit:universal-promotions` is a read-only inventory of missing dump QIDs that universal seeds would otherwise promote. It mirrors the seed loader's predicate; a missing row may be an intentional curated fallback, not an error. Set `GEOHISTORY_DB` to the staged database to inspect; do not assume that a previous production asset proves the next ingest's contents.
+
+For a fully ingested, reviewed staging dataset, `npm run audit:universal-promotions -- --strict` exits nonzero if any missing QID lacks a reviewed exception in `seed/universal-fallback-exceptions.json`. Each exception must be an object with `qid` and a nonempty `reason`; the initially empty list does not silently approve any fallbacks. This check is deliberately opt-in and read-only: it does not modify the database, prevent `npm run seed` from writing, or replace a pre-write guard. Partial/slice ingests will naturally report more misses; review them separately. The audit is a checkpoint before a future release, not evidence that the current live deployment is correct.
 
 ### Request limits
 
@@ -271,9 +277,13 @@ The proximity query deliberately reuses none of this. It applies one low signifi
 
 ## Tests
 
-There is no test runner here by design. This repository is the dataset, its pipeline, and a read-only API over it; correctness of the *data* is checked by `npm run stats`, the diagnostics above, and the prune tooling's dry runs, all of which report on a real build rather than a fixture. `npx tsc --noEmit` in CI (`.github/workflows/ci.yml`, alongside a hadolint pass over the `Dockerfile`) is the automated gate on the code, and the API's own validation layer is written to fail closed. Behavioral tests live in the clients (Circa, Locus), where the assertions are cheap and the fixtures are small.
+CI runs typecheck, scoring-metadata, fixture-checker and nearby tests, the Docker runtime COPY import guard, and Dockerfile lint. Run the suites locally with `npm run test:score`, `npm run test:fixture`, and `npm run test:nearby`. These small synthetic tests do not replace checks against a real dataset. `npm run stats`, diagnostics and prune dry runs inspect an actual build. `GEOHISTORY_DB=/path/to/events.sqlite npm run audit:universal-promotions` inventories universal promotion misses without modifying the database. Missing QIDs may be intentional curated fallbacks, not proof of errors. The optional `--strict` report fails on unreviewed misses. `npm run seed -- --strict-fallbacks` checks the committed reviewed-exception list before opening the existing database for writes and aborts on unreviewed misses; it is opt-in and is not wired into `post-ingest`. Run it on an isolated staged database without concurrent writers. Do not approve exceptions without evidence; an environment override of the exception file is intended for tests. The existing `post-ingest` chain seeds before ingest, so it must not simply be switched to strict mode without reviewing that sequence.
 
-The corollary is that nothing here exercises the running service, which is exactly how the rate limiter shipped inert: a typecheck cannot notice that a limit never fires. CI also cannot build the image, because the build needs `events.sqlite`, which is gitignored - so the `Dockerfile`'s source list is only ever verified by a deploy. Deployment-shaped guarantees have to be measured against the live instance -- see the burst under Request limits.
+`GEOHISTORY_DB=/path/to/events.sqlite npm run audit:reviewed-dupes` checks only exact pairs from the historical 132-group automatic merge plan and committed manual merge verdicts. It reports pairs where both rows have reappeared and donor-only cases where the historical survivor is absent. Add `-- --strict` to return nonzero for either case. It never removes rows or applies a semantic matcher; other TSV verdicts, new duplicates and intentional keep-both decisions are outside this audit. Review findings before any dataset change.
+
+For the standing timeline fixtures, set `GEOHISTORY_DB` to a local copy of the desired `events.sqlite` and run `npx tsx render-fixture.ts verify`. The script opens it read-only and prints its dataset version. Baseline checks gate the exit code; documented open participant-selection gaps are printed separately. `verify --strict` also fails on those gaps. Other modes: `a`, `b`, `census`, and `trace "Cold War"`; append `--json` to `a` or `b` for full timeline JSON. The fixture inputs and dataset version matter: passing against one build does not verify another.
+
+`npm run mcp:smoke` exercises the configured live API, so a timeout or cold start can fail it independently of local tests. CI's COPY guard checks runtime import coverage, but it does not build or exercise the deployed image. Deployment-shaped guarantees must still be measured against the live instance -- see the burst under Request limits.
 
 ## Known refinements (planned)
 

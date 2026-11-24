@@ -26,10 +26,19 @@
     "search": "tsx search.ts",
     "stats": "tsx stats.ts",
     "serve": "tsx server.ts",
+    "test:score": "tsx --test score.test.ts",
     "test:nearby": "tsx --test nearby.test.ts",
     "mcp": "tsx mcp/server.ts",
     "mcp:smoke": "tsx mcp/smoke.ts",
-    "diagnose:dates": "tsx diagnose-date-ranges.ts"
+    "diagnose:dates": "tsx diagnose-date-ranges.ts",
+    "test:dates": "tsx --test diagnose-date-ranges.test.ts",
+    "test:fixture": "tsx --test render-fixture-checks.test.ts",
+    "audit:universal-promotions": "tsx scripts/audit-universal-promotions.ts",
+    "test:universal-promotions": "tsx --test scripts/audit-universal-promotions.test.ts seed-preflight.test.ts",
+    "audit:reviewed-dupes": "tsx scripts/audit-reviewed-dupes.ts",
+    "audit:seed-verdicts": "tsx scripts/audit-seed-verdicts.ts",
+    "test:seed-verdicts": "tsx --test scripts/audit-seed-verdicts.test.ts",
+    "test:reviewed-dupes": "tsx --test scripts/audit-reviewed-dupes.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
