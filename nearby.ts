@@ -1,7 +1,7 @@
 // ===================== Nearby events (v1) =====================
 // Generic one-radius proximity retrieval. Product policy belongs to clients.
 
-export const NEARBY_VERSION = 'geohistory-nearby@0.1.3';
+export const NEARBY_VERSION = 'geohistory-nearby@0.1.4';
 
 export interface NearbyDatabase {
   prepare(sql: string): {
@@ -11,6 +11,7 @@ export interface NearbyDatabase {
 }
 
 export type CoordinateMode = 'direct' | 'all';
+export type NearbyOrder = 'nearest' | 'chronological';
 const DIRECT_COORD_SOURCES = ['P625', 'P276'] as const;
 
 export const NEARBY_BOUNDS = {
@@ -30,6 +31,7 @@ export interface NearbyInput {
   radiusKm: number;
   limit: number;
   offset?: number;
+  order?: NearbyOrder;
   significanceFloor: number;
   coordinateMode: CoordinateMode;
   excludeCategories: string[];
@@ -66,6 +68,7 @@ export interface NearbyResult {
   coordinateMode: CoordinateMode;
   significanceFloor: number;
   totalWithinRadius: number;
+  order: NearbyOrder;
   offset: number;
   returned: number;
   entries: NearbyEntry[];
@@ -270,23 +273,29 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
     .map((row) => ({ row, distanceKm: haversineKm(input.lat, input.lng, row.lat, row.lng) }))
     .filter((candidate) => candidate.distanceKm <= input.radiusKm);
 
-  withDistance.sort((a, b) =>
-    a.distanceKm !== b.distanceKm
-      ? a.distanceKm - b.distanceKm
-      : a.row.date_start !== b.row.date_start
-        ? compareText(a.row.date_start, b.row.date_start)
-        : compareText(a.row.id, b.row.id),
-  );
-
-  const offset = input.offset ?? 0;
-  const selected = withDistance.slice(offset, offset + input.limit);
-  selected.sort((a, b) =>
+  const compareDate = (a: typeof withDistance[number], b: typeof withDistance[number]) =>
     a.row.date_start !== b.row.date_start
       ? compareText(a.row.date_start, b.row.date_start)
       : a.distanceKm !== b.distanceKm
         ? a.distanceKm - b.distanceKm
-        : compareText(a.row.id, b.row.id),
-  );
+        : compareText(a.row.id, b.row.id);
+  const order = input.order ?? 'nearest';
+  if (order === 'chronological') {
+    // Sort the full filtered set before slicing, so pages compose one timeline.
+    withDistance.sort(compareDate);
+  } else {
+    withDistance.sort((a, b) =>
+      a.distanceKm !== b.distanceKm
+        ? a.distanceKm - b.distanceKm
+        : a.row.date_start !== b.row.date_start
+          ? compareText(a.row.date_start, b.row.date_start)
+          : compareText(a.row.id, b.row.id),
+    );
+  }
+  const offset = input.offset ?? 0;
+  const selected = withDistance.slice(offset, offset + input.limit);
+  // Preserve the original nearest-first membership / date display contract.
+  if (order === 'nearest') selected.sort(compareDate);
 
   const meta = readMeta(db);
   return {
@@ -297,6 +306,7 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
     coordinateMode: input.coordinateMode,
     significanceFloor: input.significanceFloor,
     totalWithinRadius: withDistance.length,
+    order,
     offset,
     returned: selected.length,
     entries: selected.map(({ row, distanceKm }) => ({
@@ -323,7 +333,7 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
 // ===================== Request validation =====================
 
 const ACCEPTED_FIELDS = new Set([
-  'lat', 'lng', 'radiusKm', 'limit', 'offset', 'significanceFloor', 'coordinateMode',
+  'lat', 'lng', 'radiusKm', 'limit', 'offset', 'order', 'significanceFloor', 'coordinateMode',
   'excludeCategories', 'includeUniversal', 'fromYear', 'toYear',
 ]);
 const MIN_YEAR = 1;
@@ -372,6 +382,12 @@ export function validateNearbyInput(body: unknown): NearbyInput {
       throw new Error(`offset must be an integer between 0 and ${NEARBY_BOUNDS.offset.max}.`);
     }
     offset = b.offset;
+  }
+
+  let order: NearbyOrder = 'nearest';
+  if (b.order != null) {
+    if (b.order !== 'nearest' && b.order !== 'chronological') throw new Error("order must be 'nearest' or 'chronological'.");
+    order = b.order;
   }
 
   let significanceFloor: number = NEARBY_BOUNDS.significanceFloor.default;
@@ -447,6 +463,7 @@ export function validateNearbyInput(body: unknown): NearbyInput {
     radiusKm: b.radiusKm,
     limit,
     offset,
+    order,
     significanceFloor,
     coordinateMode,
     excludeCategories,

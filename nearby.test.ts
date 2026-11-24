@@ -116,3 +116,26 @@ test('offset pages partition nearest results deterministically and retain date o
   for (const offset of [-1, 10000, 1.2, '25']) assert.throws(() => validateNearbyInput({lat:0,lng:0,radiusKm:5,offset}));
   db.close();
 });
+
+test('chronological pages sort all filtered matches before slicing, with deterministic ties', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL, display_title TEXT, blurb TEXT, date_start TEXT NOT NULL, date_end TEXT, date_precision TEXT, category TEXT, scope TEXT, significance REAL, notability REAL, coord_source TEXT, lat REAL, lng REAL, source_url TEXT); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`);
+  const insert = db.prepare(`INSERT INTO events VALUES (?, ?, NULL, NULL, ?, NULL, 'year', ?, 'local', ?, 0.5, 'P625', 0, ?, 'https://example.test')`);
+  for (let i = 0; i < 61; i++) insert.run(`Q${i}`, `Event ${i}`, String(2000-i), i % 2 ? 'event' : 'treaty', i % 3 ? 0.95 : 0.5, i / 1000);
+  const options: NearbyInput = { ...BASE_INPUT, limit: 25, order: 'chronological' };
+  const pages = [0,25,50].map(offset => nearbyEvents(db as unknown as NearbyDatabase, { ...options, offset }));
+  assert.deepEqual(pages.map(p => p.returned), [25,25,11]);
+  assert.ok(pages.every(p => p.order === 'chronological'));
+  assert.deepEqual(pages.flatMap(p => p.entries.map(e => e.id)), Array.from({length:61}, (_,i) => `Q${60-i}`));
+  const filtered = nearbyEvents(db as unknown as NearbyDatabase, { ...options, significanceFloor: 0.9, excludeCategories: ['treaty'] });
+  assert.ok(filtered.entries.every(e => e.category === 'event' && (e.significance ?? 0) >= 0.9));
+  assert.equal(validateNearbyInput({lat:0,lng:0,radiusKm:5}).order, 'nearest');
+  assert.equal(validateNearbyInput({lat:0,lng:0,radiusKm:5,order:'chronological'}).order, 'chronological');
+  assert.throws(() => validateNearbyInput({lat:0,lng:0,radiusKm:5,order:'bogus'}));
+  insert.run('T-c', 'Tie c', '1800', 'event', 0.95, 0.01);
+  insert.run('T-b', 'Tie b', '1800', 'event', 0.95, 0);
+  insert.run('T-a', 'Tie a', '1800', 'event', 0.95, 0);
+  const ties = nearbyEvents(db as unknown as NearbyDatabase, { ...options, limit: 5 });
+  assert.deepEqual(ties.entries.slice(0,3).map(e => e.id), ['T-a', 'T-b', 'T-c']);
+  db.close();
+});
