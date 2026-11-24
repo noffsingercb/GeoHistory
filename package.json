@@ -36,6 +36,8 @@
     "audit:universal-promotions": "tsx scripts/audit-universal-promotions.ts",
     "test:universal-promotions": "tsx --test scripts/audit-universal-promotions.test.ts seed-preflight.test.ts",
     "audit:reviewed-dupes": "tsx scripts/audit-reviewed-dupes.ts",
+    "audit:seed-verdicts": "tsx scripts/audit-seed-verdicts.ts",
+    "test:seed-verdicts": "tsx --test scripts/audit-seed-verdicts.test.ts",
     "test:reviewed-dupes": "tsx --test scripts/audit-reviewed-dupes.test.ts"
   },
   "dependencies": {

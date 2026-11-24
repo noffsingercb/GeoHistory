@@ -52,6 +52,9 @@ jobs:
       - name: Test reviewed duplicate audit
         run: npm run test:reviewed-dupes
 
+      - name: Test seed verdict audit
+        run: npm run test:seed-verdicts
+
       - name: Test nearby geometry, overlap, and overflow
         run: npm run test:nearby
 
