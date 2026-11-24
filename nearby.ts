@@ -16,7 +16,7 @@ const DIRECT_COORD_SOURCES = ['P625', 'P276'] as const;
 
 export const NEARBY_BOUNDS = {
   radiusKm: { min: 0.1, max: 200 },
-  limit: { min: 5, max: 100, default: 12 },
+  limit: { min: 5, max: 500, default: 12 },
   offset: { min: 0, max: 9999, default: 0 },
   significanceFloor: { min: 0.01, max: 1, default: 0.05 },
   maxDateSpanYears: 1000,

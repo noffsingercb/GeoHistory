@@ -28,7 +28,7 @@ The coordinate is accepted only in a JSON POST body. It is never placed in a URL
 | `lat` | yes | — | -90..90 |
 | `lng` | yes | — | -180..180 |
 | `radiusKm` | yes | — | 0.1..200 |
-| `limit` | no | 12 | 5..100 |
+| `limit` | no | 12 | 5..500 |
 | `offset` | no | 0 | integer 0..9999; skip this many matches in the chosen ordering |
 | `order` | no | `nearest` | `nearest` or `chronological` |
 | `significanceFloor` | no | 0.05 | 0.01..1 |

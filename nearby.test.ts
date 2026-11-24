@@ -79,11 +79,12 @@ test('candidate overflow fails instead of truncating', () => {
 });
 
 
-test('expanded bounds accept 200 km and 100 entries, but reject larger requests', () => {
+test('expanded bounds accept 200 km and 500 entries, but reject larger requests', () => {
   const input = { lat: 0, lng: 0, radiusKm: 200, limit: 100 };
   assert.equal(validateNearbyInput(input).limit, 100);
   assert.throws(() => validateNearbyInput({ ...input, radiusKm: 200.01 }));
-  assert.throws(() => validateNearbyInput({ ...input, limit: 101 }));
+  assert.equal(validateNearbyInput({ ...input, limit: 500 }).limit, 500);
+  assert.throws(() => validateNearbyInput({ ...input, limit: 501 }));
   assert.equal(validateNearbyInput({ lat: 0, lng: 0, radiusKm: 5 }).limit, 12);
 });
 
@@ -137,6 +138,18 @@ test('chronological pages sort all filtered matches before slicing, with determi
   insert.run('T-a', 'Tie a', '1800', 'event', 0.95, 0);
   const ties = nearbyEvents(db as unknown as NearbyDatabase, { ...options, limit: 5 });
   assert.deepEqual(ties.entries.slice(0,3).map(e => e.id), ['T-a', 'T-b', 'T-c']);
+  db.close();
+});
+
+test('500-entry chronological batches compose one ordered complete result set', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL, display_title TEXT, blurb TEXT, date_start TEXT NOT NULL, date_end TEXT, date_precision TEXT, category TEXT, scope TEXT, significance REAL, notability REAL, coord_source TEXT, lat REAL, lng REAL, source_url TEXT); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`);
+  const insert = db.prepare(`INSERT INTO events VALUES (?, ?, NULL, NULL, ?, NULL, 'year', 'event', 'local', 0.5, 0.5, 'P625', 0, ?, 'https://example.test')`);
+  for (let i = 0; i < 549; i++) insert.run(`Q${i}`, `Event ${i}`, String(2000 - i), i / 10000);
+  const options: NearbyInput = { ...BASE_INPUT, limit: 500, order: 'chronological' };
+  const pages = [0, 500].map(offset => nearbyEvents(db as unknown as NearbyDatabase, { ...options, offset }));
+  assert.deepEqual(pages.map(p => p.returned), [500, 49]);
+  assert.deepEqual(pages.flatMap(p => p.entries.map(e => e.id)), Array.from({ length: 549 }, (_, i) => `Q${548 - i}`));
   db.close();
 });
 
