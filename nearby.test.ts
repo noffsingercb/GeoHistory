@@ -139,3 +139,23 @@ test('chronological pages sort all filtered matches before slicing, with determi
   assert.deepEqual(ties.entries.slice(0,3).map(e => e.id), ['T-a', 'T-b', 'T-c']);
   db.close();
 });
+
+test('people mode admits only matching approximate birth/death places, never unrelated fallback locations', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL, display_title TEXT, blurb TEXT, date_start TEXT NOT NULL, date_end TEXT, date_precision TEXT, category TEXT, scope TEXT, significance REAL, notability REAL, coord_source TEXT, lat REAL, lng REAL, source_url TEXT); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`);
+  const insert = db.prepare(`INSERT INTO events VALUES (?, ?, NULL, NULL, '1900', NULL, 'year', ?, 'local', 0.9, 0.5, ?, 0, 0, 'https://example.test')`);
+  insert.run('direct', 'Direct', 'event', 'P625');
+  insert.run('birth-place', 'Birth', 'birth', 'P19');
+  insert.run('death-place', 'Death', 'death', 'P20');
+  insert.run('other-fallback', 'Other', 'event', 'P17');
+  insert.run('wrong-category', 'Wrong', 'event', 'P19');
+  insert.run('wrong-place', 'Wrong', 'birth', 'P20');
+  const direct = nearbyEvents(db as unknown as NearbyDatabase, { ...BASE_INPUT, radiusKm: 5 });
+  assert.deepEqual(direct.entries.map(e => e.id), ['direct']);
+  const people = nearbyEvents(db as unknown as NearbyDatabase, { ...BASE_INPUT, radiusKm: 5, coordinateMode: 'direct-with-people' });
+  assert.deepEqual(people.entries.map(e => e.id), ['birth-place', 'death-place', 'direct']);
+  const withoutPeople = nearbyEvents(db as unknown as NearbyDatabase, { ...BASE_INPUT, radiusKm: 5, coordinateMode: 'direct-with-people', excludeCategories: ['birth','death'] });
+  assert.deepEqual(withoutPeople.entries.map(e => e.id), ['direct']);
+  assert.equal(validateNearbyInput({lat:0,lng:0,radiusKm:5,coordinateMode:'direct-with-people'}).coordinateMode, 'direct-with-people');
+  db.close();
+});

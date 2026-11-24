@@ -10,7 +10,7 @@ export interface NearbyDatabase {
   };
 }
 
-export type CoordinateMode = 'direct' | 'all';
+export type CoordinateMode = 'direct' | 'direct-with-people' | 'all';
 export type NearbyOrder = 'nearest' | 'chronological';
 const DIRECT_COORD_SOURCES = ['P625', 'P276'] as const;
 
@@ -183,9 +183,12 @@ function buildCandidateSql(input: NearbyInput, box: BoundingBox): {
 
   if (!input.includeUniversal) where.push("(e.scope IS NULL OR e.scope <> 'universal')");
 
-  if (input.coordinateMode === 'direct') {
+  if (input.coordinateMode === 'direct' || input.coordinateMode === 'direct-with-people') {
+    const peopleClause = input.coordinateMode === 'direct-with-people'
+      ? " OR (e.category = 'birth' AND e.coord_source = 'P19') OR (e.category = 'death' AND e.coord_source = 'P20')"
+      : '';
     where.push(
-      `(e.coord_source IS NULL OR e.coord_source IN (${placeholders(DIRECT_COORD_SOURCES.length)}))`,
+      `(e.coord_source IS NULL OR e.coord_source IN (${placeholders(DIRECT_COORD_SOURCES.length)})${peopleClause})`,
     );
     params.push(...DIRECT_COORD_SOURCES);
   }
@@ -406,8 +409,8 @@ export function validateNearbyInput(body: unknown): NearbyInput {
 
   let coordinateMode: CoordinateMode = NEARBY_BOUNDS.defaultCoordinateMode;
   if (b.coordinateMode != null) {
-    if (b.coordinateMode !== 'direct' && b.coordinateMode !== 'all') {
-      throw new Error("coordinateMode must be 'direct' or 'all'.");
+    if (b.coordinateMode !== 'direct' && b.coordinateMode !== 'direct-with-people' && b.coordinateMode !== 'all') {
+      throw new Error("coordinateMode must be 'direct', 'direct-with-people' or 'all'.");
     }
     coordinateMode = b.coordinateMode;
   }

@@ -32,7 +32,7 @@ The coordinate is accepted only in a JSON POST body. It is never placed in a URL
 | `offset` | no | 0 | integer 0..9999; skip this many matches in the chosen ordering |
 | `order` | no | `nearest` | `nearest` or `chronological` |
 | `significanceFloor` | no | 0.05 | 0.01..1 |
-| `coordinateMode` | no | `direct` | `direct` or `all` |
+| `coordinateMode` | no | `direct` | `direct`, `direct-with-people` or `all` |
 | `excludeCategories` | no | `[]` | at most 20 non-empty names, 40 characters each |
 | `includeUniversal` | no | `false` | boolean |
 | `fromYear` / `toYear` | no | — | integer year 1..current UTC year+1; span at most 1000 |
@@ -67,7 +67,7 @@ SQLite natural row order never decides membership or output order.
 
 ## Coordinate quality
 
-`direct` admits `P625`, `P276`, and curated rows with a null coordinate source. It excludes country/origin centroids and birth/death-place fallbacks. `all` disables this filter so callers can measure the difference explicitly.
+`direct` admits `P625`, `P276`, and curated rows with a null coordinate source. It excludes country/origin centroids and birth/death-place fallbacks. `direct-with-people` additionally allows birthplace `P19` only for births and death-place `P20` only for deaths. These are approximate place locations, not event-site coordinates; clients must label them. It does not allow other fallbacks. `all` disables this filter so callers can measure the difference explicitly.
 
 ## Resource bounds
 
