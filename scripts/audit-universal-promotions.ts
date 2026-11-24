@@ -9,6 +9,7 @@ export type FallbackException = { qid: string; reason: string };
 export type UniversalSeed = { Title?: string; Wikidata?: string | null; Action?: 'insert' | 'promote' | null; Tier?: string | null; 'Scope (intended)'?: string | null };
 export function missingPromotions(rows: UniversalSeed[], hasDumpRow: (qid: string) => boolean): Array<{ qid: string; title: string }> {
   return rows.flatMap(row => {
+    if (!(row.Title ?? '').trim()) return []; // seed.ts skips untitled rows
     const qid = row.Wikidata?.trim();
     const universal = row.Tier === 'universal' || row['Scope (intended)'] === 'universal';
     const action = row.Action ?? (qid ? 'promote' : 'insert');

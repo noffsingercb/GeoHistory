@@ -2,6 +2,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
+import { missingPromotions, reviewFallbacks } from './scripts/audit-universal-promotions';
+import type { FallbackException } from './scripts/audit-universal-promotions';
 
 // ===================== Curated seed loader (non-scripted rows) =====================
 // Merges hand-authored event rows (curated in Notion, exported to seed/*.json)
@@ -103,6 +105,34 @@ function slugify(s: string): string {
     .slice(0, 90);
 }
 
+// Preload the exact seed files used by both the preflight and the write pass.
+// Strict mode is intentionally opt-in until fallback reviews and chain ordering
+// are decided. Run it on an isolated staged database with no concurrent writer.
+const args = process.argv.slice(2);
+if (args.some(arg => arg !== '--allow-empty' && arg !== '--strict-fallbacks')) {
+  throw new Error('Usage: npm run seed -- [--allow-empty] [--strict-fallbacks]');
+}
+const seedFiles = new Map(FILES.map(name => [name, JSON.parse(readFileSync(join(__dirname, 'seed', name), 'utf8')) as RawRow[]]));
+if (args.includes('--strict-fallbacks')) {
+  const rows = [...seedFiles.values()].flat();
+  const exceptionPath = process.env.UNIVERSAL_FALLBACK_EXCEPTIONS ?? join(__dirname, 'seed', 'universal-fallback-exceptions.json');
+  const exceptions: unknown = JSON.parse(readFileSync(exceptionPath, 'utf8'));
+  if (!Array.isArray(exceptions)) throw new Error('Fallback exceptions must be an array.');
+  const eligible = new Set(missingPromotions(rows, () => false).map(row => row.qid));
+  const readOnly = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+  try {
+    const find = readOnly.prepare("SELECT 1 FROM events WHERE id = ? AND ingest_version NOT LIKE 'seed-%'");
+    const missing = missingPromotions(rows, qid => Boolean(find.get(qid)));
+    const review = reviewFallbacks(missing, exceptions as FallbackException[], eligible);
+    if (review.expected.length) console.log('Reviewed promotion fallbacks:', JSON.stringify(review.expected));
+    if (review.unreviewed.length) {
+      console.error('Seed aborted before writes: unreviewed universal promotion fallbacks:', JSON.stringify(review.unreviewed));
+      process.exitCode = 1;
+    }
+  } finally { readOnly.close(); }
+  if (process.exitCode) process.exit(1);
+}
+
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = OFF');
@@ -168,7 +198,7 @@ let promoted = 0;
 let fellBack = 0;
 
 function loadFile(name: string): void {
-  const rows = JSON.parse(readFileSync(join(__dirname, 'seed', name), 'utf8')) as RawRow[];
+  const rows = seedFiles.get(name)!;
   const isUniversalFile = name.startsWith('universal-');
   const tx = db.transaction((items: RawRow[]) => {
     for (const r of items) {

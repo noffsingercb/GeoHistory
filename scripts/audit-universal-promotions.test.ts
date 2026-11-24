@@ -8,6 +8,7 @@ test('reports missing promotions but excludes existing, deliberate inserts and n
     { Title: 'Missing', Wikidata: 'Q2', Tier: 'universal', Action: 'promote' as const },
     { Title: 'Intentional insert', Wikidata: 'Q3', Tier: 'universal', Action: 'insert' as const },
     { Title: 'Ordinary', Wikidata: 'Q4' },
+    { Title: '   ', Wikidata: 'Q5', Tier: 'universal' }, // skipped by seed loader
   ];
   assert.deepEqual(missingPromotions(rows, qid => qid === 'Q1'), [{ qid: 'Q2', title: 'Missing' }]);
 });
