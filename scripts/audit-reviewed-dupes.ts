@@ -1,7 +1,8 @@
-/** Read-only audit of exact historical manual merge decisions, not a duplicate matcher. */
+/** Read-only audit of exact historical merge decisions, not a duplicate matcher. */
 import Database from 'better-sqlite3'
 import { pathToFileURL } from 'node:url'
 import { VERDICTS } from './lib/reviewed-dupe-verdicts.js'
+import { HISTORIC_AUTO_MERGES } from './lib/historic-auto-dupe-merges.js'
 import type { MergeSpec } from './lib/dupe-apply.js'
 
 type ReviewedPair = { survivor: string; donor: string; verdicts: string[] }
@@ -47,13 +48,13 @@ function main(): void {
   if (args.some(a => a !== '--strict')) throw new Error('Usage: npm run audit:reviewed-dupes -- [--strict]')
   const strict = args.includes('--strict')
   const dbPath = process.env.GEOHISTORY_DB ?? 'events.sqlite'
-  const pairs = reviewedPairs(VERDICTS)
+  const pairs = reviewedPairs([...HISTORIC_AUTO_MERGES, ...VERDICTS])
   const db = new Database(dbPath, { readonly: true, fileMustExist: true })
   try {
     const query = db.prepare('SELECT 1 FROM events WHERE id = ?')
     const review = classifyReviewedPairs(pairs, id => Boolean(query.get(id)))
-    console.log(JSON.stringify({ db: dbPath, strict, verdictGroups: VERDICTS.length, reviewedPairs: pairs.length, ...review,
-      note: 'Exact historic manual verdicts only. No title matching, automatic deletion, or claim of complete duplicate coverage.' }, null, 2))
+    console.log(JSON.stringify({ db: dbPath, strict, manualVerdictGroups: VERDICTS.length, historicAutoGroups: HISTORIC_AUTO_MERGES.length, reviewedPairs: pairs.length, ...review,
+      note: 'Exact historic automatic-plan and manual-verdict IDs only. No title matching, automatic deletion, or claim of complete duplicate coverage.' }, null, 2))
     if (strict && (review.bothPresent.length || review.donorOnly.length)) process.exitCode = 1
   } finally { db.close() }
 }

@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process'
 import Database from 'better-sqlite3'
 import { classifyReviewedPairs, reviewedPairs } from './audit-reviewed-dupes'
 import { NO_MERGE, VERDICTS } from './lib/reviewed-dupe-verdicts'
+import { HISTORIC_AUTO_MERGES } from './lib/historic-auto-dupe-merges'
 
 test('only explicit reviewed pairs are audited and repeated verdicts are grouped', () => {
   const pairs = reviewedPairs([
@@ -23,6 +24,14 @@ test('only explicit reviewed pairs are audited and repeated verdicts are grouped
   assert.ok(NO_MERGE.some(v => v.id === 'G006'))
   assert.ok(actual.every(p => p.verdicts.every(id => !NO_MERGE.some(v => v.id === id))))
   assert.ok(actual.every(p => !p.survivor.includes('#') && !p.donor.includes('#')))
+})
+
+test('historic automatic plan contains its exact recorded 132 groups and 133 donors', () => {
+  assert.equal(HISTORIC_AUTO_MERGES.length, 132)
+  assert.equal(reviewedPairs(HISTORIC_AUTO_MERGES).length, 133)
+  const combined = reviewedPairs([...HISTORIC_AUTO_MERGES, ...VERDICTS])
+  assert.ok(combined.some(p => p.survivor === 'Q853685' && p.donor === 'seed:noteborg-1323-08-12' && p.verdicts.includes('auto:M001')))
+  assert.ok(combined.every(p => !p.survivor.includes('#') && !p.donor.includes('#')))
 })
 
 test('categorizes present pairs, missing survivors, and absent donors without inferring identity', () => {
