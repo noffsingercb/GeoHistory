@@ -49,6 +49,9 @@ jobs:
       - name: Test universal promotion audit
         run: npm run test:universal-promotions
 
+      - name: Test reviewed duplicate audit
+        run: npm run test:reviewed-dupes
+
       - name: Test nearby geometry, overlap, and overflow
         run: npm run test:nearby
 

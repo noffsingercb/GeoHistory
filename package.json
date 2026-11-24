@@ -34,7 +34,9 @@
     "test:dates": "tsx --test diagnose-date-ranges.test.ts",
     "test:fixture": "tsx --test render-fixture-checks.test.ts",
     "audit:universal-promotions": "tsx scripts/audit-universal-promotions.ts",
-    "test:universal-promotions": "tsx --test scripts/audit-universal-promotions.test.ts seed-preflight.test.ts"
+    "test:universal-promotions": "tsx --test scripts/audit-universal-promotions.test.ts seed-preflight.test.ts",
+    "audit:reviewed-dupes": "tsx scripts/audit-reviewed-dupes.ts",
+    "test:reviewed-dupes": "tsx --test scripts/audit-reviewed-dupes.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
