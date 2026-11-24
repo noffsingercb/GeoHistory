@@ -1,7 +1,7 @@
 // ===================== Nearby events (v1) =====================
 // Generic one-radius proximity retrieval. Product policy belongs to clients.
 
-export const NEARBY_VERSION = 'geohistory-nearby@0.1.1';
+export const NEARBY_VERSION = 'geohistory-nearby@0.1.4';
 
 export interface NearbyDatabase {
   prepare(sql: string): {
@@ -10,12 +10,14 @@ export interface NearbyDatabase {
   };
 }
 
-export type CoordinateMode = 'direct' | 'all';
+export type CoordinateMode = 'direct' | 'direct-with-people' | 'all';
+export type NearbyOrder = 'nearest' | 'chronological';
 const DIRECT_COORD_SOURCES = ['P625', 'P276'] as const;
 
 export const NEARBY_BOUNDS = {
-  radiusKm: { min: 0.1, max: 150 },
-  limit: { min: 5, max: 25, default: 12 },
+  radiusKm: { min: 0.1, max: 200 },
+  limit: { min: 5, max: 500, default: 12 },
+  offset: { min: 0, max: 9999, default: 0 },
   significanceFloor: { min: 0.01, max: 1, default: 0.05 },
   maxDateSpanYears: 1000,
   maxCandidateRows: 10000,
@@ -28,6 +30,8 @@ export interface NearbyInput {
   lng: number;
   radiusKm: number;
   limit: number;
+  offset?: number;
+  order?: NearbyOrder;
   significanceFloor: number;
   coordinateMode: CoordinateMode;
   excludeCategories: string[];
@@ -64,6 +68,8 @@ export interface NearbyResult {
   coordinateMode: CoordinateMode;
   significanceFloor: number;
   totalWithinRadius: number;
+  order: NearbyOrder;
+  offset: number;
   returned: number;
   entries: NearbyEntry[];
 }
@@ -177,9 +183,12 @@ function buildCandidateSql(input: NearbyInput, box: BoundingBox): {
 
   if (!input.includeUniversal) where.push("(e.scope IS NULL OR e.scope <> 'universal')");
 
-  if (input.coordinateMode === 'direct') {
+  if (input.coordinateMode === 'direct' || input.coordinateMode === 'direct-with-people') {
+    const peopleClause = input.coordinateMode === 'direct-with-people'
+      ? " OR (e.category = 'birth' AND e.coord_source = 'P19') OR (e.category = 'death' AND e.coord_source = 'P20')"
+      : '';
     where.push(
-      `(e.coord_source IS NULL OR e.coord_source IN (${placeholders(DIRECT_COORD_SOURCES.length)}))`,
+      `(e.coord_source IS NULL OR e.coord_source IN (${placeholders(DIRECT_COORD_SOURCES.length)})${peopleClause})`,
     );
     params.push(...DIRECT_COORD_SOURCES);
   }
@@ -267,22 +276,29 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
     .map((row) => ({ row, distanceKm: haversineKm(input.lat, input.lng, row.lat, row.lng) }))
     .filter((candidate) => candidate.distanceKm <= input.radiusKm);
 
-  withDistance.sort((a, b) =>
-    a.distanceKm !== b.distanceKm
-      ? a.distanceKm - b.distanceKm
-      : a.row.date_start !== b.row.date_start
-        ? compareText(a.row.date_start, b.row.date_start)
-        : compareText(a.row.id, b.row.id),
-  );
-
-  const selected = withDistance.slice(0, input.limit);
-  selected.sort((a, b) =>
+  const compareDate = (a: typeof withDistance[number], b: typeof withDistance[number]) =>
     a.row.date_start !== b.row.date_start
       ? compareText(a.row.date_start, b.row.date_start)
       : a.distanceKm !== b.distanceKm
         ? a.distanceKm - b.distanceKm
-        : compareText(a.row.id, b.row.id),
-  );
+        : compareText(a.row.id, b.row.id);
+  const order = input.order ?? 'nearest';
+  if (order === 'chronological') {
+    // Sort the full filtered set before slicing, so pages compose one timeline.
+    withDistance.sort(compareDate);
+  } else {
+    withDistance.sort((a, b) =>
+      a.distanceKm !== b.distanceKm
+        ? a.distanceKm - b.distanceKm
+        : a.row.date_start !== b.row.date_start
+          ? compareText(a.row.date_start, b.row.date_start)
+          : compareText(a.row.id, b.row.id),
+    );
+  }
+  const offset = input.offset ?? 0;
+  const selected = withDistance.slice(offset, offset + input.limit);
+  // Preserve the original nearest-first membership / date display contract.
+  if (order === 'nearest') selected.sort(compareDate);
 
   const meta = readMeta(db);
   return {
@@ -293,6 +309,8 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
     coordinateMode: input.coordinateMode,
     significanceFloor: input.significanceFloor,
     totalWithinRadius: withDistance.length,
+    order,
+    offset,
     returned: selected.length,
     entries: selected.map(({ row, distanceKm }) => ({
       id: row.id,
@@ -318,7 +336,7 @@ export function nearbyEvents(db: NearbyDatabase, input: NearbyInput): NearbyResu
 // ===================== Request validation =====================
 
 const ACCEPTED_FIELDS = new Set([
-  'lat', 'lng', 'radiusKm', 'limit', 'significanceFloor', 'coordinateMode',
+  'lat', 'lng', 'radiusKm', 'limit', 'offset', 'order', 'significanceFloor', 'coordinateMode',
   'excludeCategories', 'includeUniversal', 'fromYear', 'toYear',
 ]);
 const MIN_YEAR = 1;
@@ -361,6 +379,20 @@ export function validateNearbyInput(body: unknown): NearbyInput {
     limit = b.limit;
   }
 
+  let offset: number = NEARBY_BOUNDS.offset.default;
+  if (b.offset != null) {
+    if (!finiteNumber(b.offset) || !Number.isInteger(b.offset) || b.offset < 0 || b.offset > NEARBY_BOUNDS.offset.max) {
+      throw new Error(`offset must be an integer between 0 and ${NEARBY_BOUNDS.offset.max}.`);
+    }
+    offset = b.offset;
+  }
+
+  let order: NearbyOrder = 'nearest';
+  if (b.order != null) {
+    if (b.order !== 'nearest' && b.order !== 'chronological') throw new Error("order must be 'nearest' or 'chronological'.");
+    order = b.order;
+  }
+
   let significanceFloor: number = NEARBY_BOUNDS.significanceFloor.default;
   if (b.significanceFloor != null) {
     if (!finiteNumber(b.significanceFloor)) throw new Error('significanceFloor must be a number.');
@@ -377,8 +409,8 @@ export function validateNearbyInput(body: unknown): NearbyInput {
 
   let coordinateMode: CoordinateMode = NEARBY_BOUNDS.defaultCoordinateMode;
   if (b.coordinateMode != null) {
-    if (b.coordinateMode !== 'direct' && b.coordinateMode !== 'all') {
-      throw new Error("coordinateMode must be 'direct' or 'all'.");
+    if (b.coordinateMode !== 'direct' && b.coordinateMode !== 'direct-with-people' && b.coordinateMode !== 'all') {
+      throw new Error("coordinateMode must be 'direct', 'direct-with-people' or 'all'.");
     }
     coordinateMode = b.coordinateMode;
   }
@@ -433,6 +465,8 @@ export function validateNearbyInput(body: unknown): NearbyInput {
     lng: b.lng,
     radiusKm: b.radiusKm,
     limit,
+    offset,
+    order,
     significanceFloor,
     coordinateMode,
     excludeCategories,

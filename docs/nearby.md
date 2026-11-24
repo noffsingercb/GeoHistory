@@ -1,6 +1,6 @@
 # Nearby events (`POST /v1/nearby`)
 
-A generic, read-only proximity query over `events.sqlite`. It selects by distance from one caller-supplied point and returns the selected set in date order. Radius escalation, category taste, copy, and map behavior belong to clients.
+A generic, read-only proximity query over `events.sqlite`. By default it selects by distance from one caller-supplied point and returns the selected set in date order; callers can opt into global chronological pagination. Radius escalation, category taste, copy, and map behavior belong to clients.
 
 ## Privacy
 
@@ -27,10 +27,12 @@ The coordinate is accepted only in a JSON POST body. It is never placed in a URL
 | --- | --- | --- | --- |
 | `lat` | yes | — | -90..90 |
 | `lng` | yes | — | -180..180 |
-| `radiusKm` | yes | — | 0.1..150 |
-| `limit` | no | 12 | 5..25 |
+| `radiusKm` | yes | — | 0.1..200 |
+| `limit` | no | 12 | 5..500 |
+| `offset` | no | 0 | integer 0..9999; skip this many matches in the chosen ordering |
+| `order` | no | `nearest` | `nearest` or `chronological` |
 | `significanceFloor` | no | 0.05 | 0.01..1 |
-| `coordinateMode` | no | `direct` | `direct` or `all` |
+| `coordinateMode` | no | `direct` | `direct`, `direct-with-people` or `all` |
 | `excludeCategories` | no | `[]` | at most 20 non-empty names, 40 characters each |
 | `includeUniversal` | no | `false` | boolean |
 | `fromYear` / `toYear` | no | — | integer year 1..current UTC year+1; span at most 1000 |
@@ -57,16 +59,15 @@ A ranged event that began before the window remains eligible when its end reache
 ## Deterministic ordering
 
 1. Apply generic filters and exact radius.
-2. Sort all matches by full-precision distance, `date_start`, then `id`.
-3. Take `limit`.
-4. Re-sort only that selected set by `date_start`, distance, then `id`.
-5. Round response distance to two decimal places.
+2. Default `nearest`: sort by full-precision distance, date and ID; select the requested page, then sort that page by date, distance and ID. This preserves the original selection contract.
+3. Opt-in `chronological`: sort the entire matching set by date, full-precision distance, then ID **before** applying offset and limit. Pages compose one stable chronological sequence. The response echoes `order`.
+4. Round response distance to two decimal places. Compare `datasetBuild` between pages and restart if it changes.
 
 SQLite natural row order never decides membership or output order.
 
 ## Coordinate quality
 
-`direct` admits `P625`, `P276`, and curated rows with a null coordinate source. It excludes country/origin centroids and birth/death-place fallbacks. `all` disables this filter so callers can measure the difference explicitly.
+`direct` admits `P625`, `P276`, and curated rows with a null coordinate source. It excludes country/origin centroids and birth/death-place fallbacks. `direct-with-people` additionally allows birthplace `P19` only for births and death-place `P20` only for deaths. These are approximate place locations, not event-site coordinates; clients must label them. It does not allow other fallbacks. `all` disables this filter so callers can measure the difference explicitly.
 
 ## Resource bounds
 
